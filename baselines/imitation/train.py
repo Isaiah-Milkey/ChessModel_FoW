@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--val", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--save-best", action="store_true",
+                    help="keep the weights from the epoch with the best validation match, not the last")
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -72,6 +74,7 @@ def main():
     def masked_logits(xb, mb):
         return net(xb).masked_fill(~mb, -1e9)
 
+    best_acc, best_ep, best_state = -1.0, 0, None
     for ep in range(args.epochs):
         net.train()
         t = time.time()
@@ -93,9 +96,15 @@ def main():
                 correct += (masked_logits(xb, mb).argmax(1) == yb).sum().item()
         print(f"epoch {ep + 1}: train loss {tot / len(tr_idx):.3f}, "
               f"validation match with teacher {correct / n_val:.3f} ({time.time() - t:.0f}s)", flush=True)
+        if correct / n_val > best_acc:
+            best_acc, best_ep = correct / n_val, ep + 1
+            best_state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
 
+    state = best_state if args.save_best else net.state_dict()
+    if args.save_best:
+        print(f"keeping epoch {best_ep} (validation match {best_acc:.3f})")
     os.makedirs(os.path.join(args.agent_dir, "weights"), exist_ok=True)
-    save_file({k: v.detach().cpu().contiguous() for k, v in net.state_dict().items()},
+    save_file({k: v.detach().cpu().contiguous() for k, v in state.items()},
               os.path.join(args.agent_dir, "weights", "model.safetensors"))
     json.dump({"in_planes": in_planes, "channels": args.channels, "blocks": args.blocks},
               open(os.path.join(args.agent_dir, "config.json"), "w"), indent=1)
