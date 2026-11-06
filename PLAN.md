@@ -53,3 +53,23 @@ Data generation will be reproducible and stored on the Github so a dataset can b
 What might not work, and what you would do instead. Questions for the staff.
 
 Since fog of war is a more 'random' style of chess, I belive luck could cause the model to learn the wrong types of gameplay. Fixing this could require specific styles of learning that rewards a more strategic play style. No quesitons for staff.
+
+# 11/6/26 (Written by Isaiah)
+What I've learned:
+- Scaling up the model doesn't necessarily help? The baseline model size is large enough to learn given current training data. Larger model is overkill for no significant change. This is supported from experiments.
+- Training on more games helps increase to about 1360 elo. This is where the model plateus. Larger models just take longer to train, but I dont think this model is that large.
+- Memory doesnt update until the piece has been seen again. I bet this leads to lots of misinformed play. (Should add a degradation of memory over time).
+- Model learns from random sets of turns independent of time or previous turns. I think this is bad as turn count and previous moves are important? Can we have a memory block with turn number being a factor?
+- Training is learned from Stockfish knowledge, meaning its learning from a bot playing a different game (not FoW).
+
+What this tells me:
+- This reminds me of BERT vs GPT. Bert was bad at generating good writing because it was trained to see bidirectionally. Chess is similar where the model is learning from a bot that has access to the whole board even though it only knows its own position.
+GPT came out on top because of scaling parameter size, and training the next token based off of previous tokens.
+I want to do something similar where it predicts next play off of past sequence of turns- rather than current board= best play. Context matters.
+
+Things to add/change.
+Have memory deteriorate over moves (3/4 turns?)
+Add training for sequential plays (to remember patterns/games)
+Train on FoW games?
+
+Generated a site to learn the project better: [link](https://claude.ai/artifact/DR62zpnhh3Chg1APMBaQmJ#how)
