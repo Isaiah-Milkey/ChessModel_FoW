@@ -87,3 +87,36 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
   (memory) or self-play.
 - **AI help:** Claude Code generated the data, trained and evaluated the models, found the
   repeated-games problem, wrote the random-opening change and drafted this entry.
+
+### 2026-11-06: 19x more data, and training until plateau
+*(Facts drafted by Claude Code from the run output; content written by Isaiah.)*
+- **Question / hypothesis:** How much can we scale up training to improve accuracy?
+- **Commit:** models trained on `7139047` plus the uncommitted `--save-best` flag; the flag is
+  `3ffb86c` and the best model is `27c5996` (`agents/baseline_75k`).
+- **Setup:**
+  - Data: `generate_data.py --games 100000 --workers 12 --out data/imitation_100k --seed 2`.
+    Workers 5, 6 and 9 died silently at about 25 and 40 minutes in (no error in the log or in
+    Windows event logs), and the run hung waiting for them, so I stopped it. The 9 finished
+    shards hold 1,520,478 positions from about 75,000 games (3.7x the 20K set, 19x the baseline).
+  - Training: 64x4 for 6 epochs, then 64x4 and 128x4 for 16 epochs with `--save-best` (keeps
+    the epoch with the best validation match). RTX 3060 Ti: 44 s per epoch for 64x4, 90 s for 128x4.
+  - Evaluation: 200 games each against bot:greedy and bot:guess-sf-4x500, plus 400 games head to head.
+- **Result:**
+  | Model | Epochs (best) | Validation match | vs greedy | vs guess-sf-4x500 | Rating (95%) |
+  |---|---|---:|---:|---:|---|
+  | 64x4 | 6 (6) | 42.2% | 168 / 200 | 167 / 200 | 1317 [1284, 1360] |
+  | 64x4 (`baseline_75k`) | 16 (12) | 42.1% | 176 / 200 | 168 / 200 | 1347 [1298, 1402] |
+  | 128x4 | 16 (7) | 42.4% | 163 / 200 | 166 / 200 | 1298 [1248, 1346] |
+
+  - 64x4 plateaued: validation stayed at 42.1% from epoch 9 to 12, then slipped to 41.9%.
+  - 128x4 peaked at epoch 7, then overfit: validation fell to 40.0% by epoch 16 while training
+    loss fell from 1.83 to 1.36.
+  - Head to head, 64x4 (epoch 12) beat 128x4 (epoch 7) 216 / 400 (54%, 365 unique games),
+    at the edge of noise. The 64x4 6-epoch model vs the 20K-data 64x4: 208 / 400 (52%).
+  - Compared with the baseline (1205), `baseline_75k` is about +140 Elo and plays at the
+    same size and compute (4e7 FLOPs per move).
+- **What surprised me:** The bigger model didn't help. This tells me that the size model we have now is good enough with the data I am currently using. (Will have to change architecture or data next to improve accuracy). We are limited by stockfish training.
+- **Decision:** Move forward with this as my model/architecure.
+- **AI help:** Claude Code ran the data generation, diagnosed and stopped the hung run, added
+  `--save-best`, trained and evaluated the models, wrote the model card and drafted the facts
+  in this entry.
