@@ -220,3 +220,76 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
 - **AI help:** Claude Code wrote the `move_history` agent, the `--record` flag and
   `reencode.py`, generated and checked the data, trained both models, ran the evaluations,
   wrote the model card and drafted the facts in this entry.
+
+### 2026-11-07: dropout, merging repeated positions, and branching games
+*(Drafted by Claude Code from the run output; edited by Isaiah.)*
+- **Question / hypothesis:** `move_history` seemed to be overfitting on Stockfish's moves, and
+  most of the training data looked the same. Three changes should make the model generalize
+  better: dropout; training on each repeated position once (Test A); and new games that
+  branch into positions the old data never reached, later in the game (Test B).
+- **Commit:** `a341617` (`--split view` and `--merge` in `baselines/imitation/train.py`) and
+  `f307d6d` (`--random-plies`, `--keep-schedule`, `--matchups long` and `--play-agent` in
+  `baselines/imitation/generate_data.py`). The default behaviour of both scripts is unchanged
+  (checked byte for byte against the previous commit). The dropout models (`model.py` with
+  `DROPOUT = 0.1`) are in `runs/`, which is not committed.
+- **Setup:**
+  - All models are `move_history` (29 planes, 64x4) trained for 16 epochs with
+    `--save-best`, seed 0, about 12 min each on the RTX 3060 Ti.
+  - Dropout: `nn.Dropout` after the first ReLU of each residual block and before the head
+    (off when playing). Rates 0.1 and 0.3, on the `move_history` data.
+  - Repeated positions, measured on the 75K-game data (baseline encoding): only 81.9% of
+    positions are distinct. Repeats by stage: plies 0-3 100%, 4-9 62%, 10-19 2%, later
+    about 1%; the start view alone appears 75,143 times. In 70.5% of repeated views the
+    teacher gave different moves, so no model can match it on more than 58.6% of them.
+  - Leak-free validation (`--split view`): the old split held out random positions, so
+    common openings were in both training and validation. Holding out whole distinct views
+    instead lowers the score of the same dropout-0.1 model from 42.5% to 41.3%. The models
+    below are all compared with this split.
+  - Test A (`--merge`): each distinct view trained once, with the share of each teacher move
+    as a soft target. Under the 29-plane encoding only 1.0% of the 1,218,233 training views
+    have more than one teacher move, so this mostly removes repeats.
+  - Test B (branching games): 54,000 new games, seed 4, 1,508,144 positions (about 28 per
+    game, against 20 before), 78 min on 10 workers. Each game opens with 0-10 random moves,
+    positions are kept with probability 0.1 before ply 10, 0.5 before ply 20 and 1 after,
+    and the matchups are guess-sf-4x500 vs itself, `move_history` vs guess-sf-4x500,
+    `move_history` vs guess-sf-16x1000 and `move_history` vs itself. Opening positions
+    (plies 0-9) fell from 25% to 4% of the data, and ply 20+ rose from 53% to 80%.
+  - Evaluation: 200 games each against bot:greedy, bot:guess-sf-4x500 and
+    bot:guess-sf-16x1000 on arena seed 6 (the same 600 games, with the same colours, as
+    `move_history`), plus 1,000 games of Test B against the reference.
+- **Result:**
+  | Model | Validation match (own split) | vs greedy | vs guess-sf-4x500 | vs guess-sf-16x1000 | Rating (95%) |
+  |---|---:|---:|---:|---:|---|
+  | `move_history` (no dropout, earlier) | 42.0% (position split) | 173 | 173 | 135 | 1353 [1322, 1387] |
+  | dropout 0.1, reference (`runs/mh_drop10_view`) | 41.3% | 170 | 166 | 138 | 1340 [1302, 1371] |
+  | Test A, merged (`runs/mh_drop10_merge`) | 41.5% | 169 | 171 | 148 | 1367 [1330, 1402] |
+  | Test B, branching (`runs/mh_drop10_branch`) | 39.1% (its own data) | 183 | 175 | 146 | **1401 [1359, 1437]** |
+
+  Scores are out of 200.
+  - **Head to head, Test B beat the reference 653 / 1000** (+110 Elo, 95% interval
+    [+91, +141]). This is the first clearly significant gain since `baseline_75k`.
+  - **Dropout alone did not help:** 42.5% (0.1) and 42.2% (0.3) against 42.0% on the old
+    split, and the dropout-0.1 reference rated 13 below `move_history` in games (intervals
+    overlap).
+  - **Test A leans better** (+27 over the reference, intervals overlap; no head to head).
+  - **Validation match did not predict the games.** Each model scored on both held-out sets:
+
+    | Model | Old data, held out | Branching data, held out |
+    |---|---:|---:|
+    | reference | 41.3% | 37.8% |
+    | Test A | 41.5% | 38.1% |
+    | Test B | 40.4% | 39.1% |
+
+    Test B matches Stockfish less often on old-style openings (48.8% vs 51.6%) and is level on
+    later positions, yet it wins far more games. Matching about 38% of moves later in the game
+    seems to be a ceiling while the teacher can see pieces the agent cannot.
+  - **A likely reason:** most Test B games were played by `move_history` itself, so it
+    trained on the positions it actually reaches in its own games, and on far more
+    middlegame and endgame positions. The earlier data came only from bots playing each
+    other. A different set of training games alone moved the rating by about 20 before, far
+    less than this.
+- **What surprised me:** _(to fill in)_
+- **Decision:** _(to fill in)_
+- **AI help:** Claude Code added dropout, the view split, merging and the branching-game
+  options, measured the repeated positions, generated the branching data, trained and
+  evaluated the models and drafted the facts in this entry.
