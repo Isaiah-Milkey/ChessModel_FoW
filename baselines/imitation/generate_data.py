@@ -12,6 +12,12 @@ With --record, each worker also writes games_<seed>_<worker>.jsonl.gz: one line 
 its moves and the teacher label of every kept position. reencode.py turns those into shards
 for any agent's encoding without running Stockfish again.
 
+Options for more varied games (all off by default):
+  --random-plies N     each game opens with 0..N random legal moves (the number is random per game)
+  --keep-schedule S    keep probability by ply, e.g. "0:0.1,10:0.5,20:1" (replaces --keep)
+  --matchups long      fewer quick wins: no random or greedy bots, more guess-sf games, and
+                       --play-agent DIR (for example agents/move_history) plays in 3 of 4 pairings
+
 Writes one .npz shard per worker with
     x      uint8 [N, 22, 8, 8]   input planes (see agents/baseline/features.py)
     y      int16 [N]             teacher move index
@@ -41,6 +47,32 @@ from fow.memory import Memory  # noqa: E402
 MATCHUPS = [("bot:guess-sf-4x500", "bot:guess-sf-4x500"), ("bot:guess-sf-4x500", "bot:greedy"),
             ("bot:naive-sf", "bot:guess-sf-4x500"), ("bot:greedy", "bot:greedy"),
             ("bot:guess-sf-4x500", "bot:random")]
+# --matchups long: "agent" is the --play-agent directory
+LONG_MATCHUPS = [("bot:guess-sf-4x500", "bot:guess-sf-4x500"), ("agent", "bot:guess-sf-4x500"),
+                 ("agent", "bot:guess-sf-16x1000"), ("agent", "agent")]
+
+
+class AgentPlayer:
+    """An agent directory as a data-generation player, run in its own process as in fow.arena."""
+
+    def __init__(self, agent_dir):
+        from fow.referee import make_player
+        self.player = make_player(agent_dir, device="cpu")
+
+    def reset(self, color, seed):
+        self.player.reset(color, seed)
+
+    def act(self, obs):
+        return self.player.act(obs, 120)[0]
+
+    def close(self):
+        self.player.close()
+
+
+def parse_schedule(text):
+    """"0:0.1,10:0.5,20:1" -> keep probability function of the ply."""
+    steps = sorted((int(a), float(b)) for a, b in (part.split(":") for part in text.split(",")))
+    return lambda ply: [p for start, p in steps if ply >= start][-1]
 
 
 def load_encoding(agent_dir):
@@ -69,7 +101,8 @@ def teacher_move(engine, game, nodes):
 
 
 def worker(args):
-    wid, n_games, nodes, keep, out, seed, agent_dir, record = args
+    wid, n_games, nodes, keep, out, seed, agent_dir, record, random_plies, schedule, matchups, play_agent = args
+    keep_at = parse_schedule(schedule) if schedule else (lambda ply: keep)
     make_memory, enc, legal_idx, move_idx = load_encoding(agent_dir)
     rng = random.Random(seed + wid)
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path())
@@ -78,23 +111,26 @@ def worker(args):
     xs, ys, legals = [], [], []
     games = []
     for g in range(n_games):
-        a, b = rng.choice(MATCHUPS)
+        a, b = rng.choice(LONG_MATCHUPS if matchups == "long" else MATCHUPS)
         if rng.random() < 0.5:
             a, b = b, a
-        for spec in (a, b):
-            if spec not in bots:
-                bots[spec] = make_bot(spec)
-        players = {"white": bots[a], "black": bots[b]}
+        players = {}
+        for color, spec in (("white", a), ("black", b)):
+            key = (spec, color) if spec == "agent" else spec   # an agent needs one process per side
+            if key not in bots:
+                bots[key] = AgentPlayer(play_agent) if spec == "agent" else make_bot(spec)
+            players[color] = bots[key]
         players["white"].reset("white", rng.randrange(1 << 30))
         players["black"].reset("black", rng.randrange(1 << 30))
         mem = {"white": make_memory(), "black": make_memory()}
         game = Game()
         moves, labels = [], []
+        n_random = rng.randint(0, random_plies) if random_plies else 0
         while not game.over:
             obs = game.observation()
             c = obs["color"]
             mem[c].update(obs)
-            if rng.random() < keep:
+            if rng.random() < keep_at(obs["ply"]):
                 label = teacher_move(engine, game, nodes)
                 if label is not None:
                     if len(label) == 5:
@@ -105,11 +141,16 @@ def worker(args):
                     ys.append(move_idx(label, c))
                     legals.append(np.packbits(mask))
                     labels.append([obs["ply"], label])
-            mv = players[c].act(obs)
+            mv = players[c].act(obs)               # always called, so players keep up with the game
+            if obs["ply"] < n_random:
+                mv = rng.choice(sorted(game.legal_uci()))
             moves.append(mv)
             game.play(mv)
         if record:
-            games.append({"white": a, "black": b, "moves": moves, "labels": labels})
+            rec = {"white": a, "black": b, "moves": moves, "labels": labels}
+            if random_plies:
+                rec["random_plies"] = n_random
+            games.append(rec)
         if (g + 1) % 50 == 0:
             print(f"worker {wid}: {g + 1}/{n_games} games, {len(ys)} positions", flush=True)
     engine.quit()
@@ -136,10 +177,19 @@ def main():
                     help="encode inputs with this agent's features.py (default: agents/baseline)")
     ap.add_argument("--record", action="store_true",
                     help="also save every game's moves and teacher labels, for reencode.py")
+    ap.add_argument("--random-plies", type=int, default=0,
+                    help="open each game with 0..N random legal moves (N drawn per game)")
+    ap.add_argument("--keep-schedule", default=None,
+                    help='keep probability by ply, e.g. "0:0.1,10:0.5,20:1" (overrides --keep)')
+    ap.add_argument("--matchups", choices=["default", "long"], default="default")
+    ap.add_argument("--play-agent", default=None, help="agent directory that plays in --matchups long")
     args = ap.parse_args()
+    if args.matchups == "long" and not args.play_agent:
+        ap.error("--matchups long needs --play-agent")
     os.makedirs(args.out, exist_ok=True)
     per = [args.games // args.workers + (1 if i < args.games % args.workers else 0) for i in range(args.workers)]
-    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed, args.agent_dir, args.record) for i in range(args.workers)]
+    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed, args.agent_dir, args.record,
+             args.random_plies, args.keep_schedule, args.matchups, args.play_agent) for i in range(args.workers)]
     with mp.get_context("spawn").Pool(args.workers) as pool:
         n = sum(pool.map(worker, jobs))
     print(f"wrote {n} positions to {args.out}")
