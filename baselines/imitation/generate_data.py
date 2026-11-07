@@ -4,12 +4,17 @@ agent cannot see, so its labels are a useful but limited signal).
 
     python baselines/imitation/generate_data.py --games 2000 --workers 8 --out data/imitation
 
+Inputs are encoded with agents/baseline/features.py and fow.memory.Memory. With --agent-dir,
+they use that agent's features.py instead, and its make_memory() and encode_from_memory(obs,
+memory) when it defines them, so the training inputs match what that agent sees in play.
+
 Writes one .npz shard per worker with
     x      uint8 [N, 22, 8, 8]   input planes (see agents/baseline/features.py)
     y      int16 [N]             teacher move index
     legal  uint8 [N, 512]        packed bit mask of legal move indices
 """
 import argparse
+import importlib.util
 import multiprocessing as mp
 import os
 import random
@@ -32,6 +37,20 @@ MATCHUPS = [("bot:guess-sf-4x500", "bot:guess-sf-4x500"), ("bot:guess-sf-4x500",
             ("bot:guess-sf-4x500", "bot:random")]
 
 
+def load_encoding(agent_dir):
+    """(make_memory, encode(obs, memory), legal_indices, move_index) for an agent directory;
+    agent_dir None means the baseline's encoding."""
+    if agent_dir is None:
+        return Memory, lambda obs, mem: encode(obs, mem.last_seen), legal_indices, move_index
+    sys.path.insert(0, os.path.abspath(agent_dir))   # lets features.py import its own modules
+    spec = importlib.util.spec_from_file_location("agent_features", os.path.join(agent_dir, "features.py"))
+    feats = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(feats)
+    make_memory = getattr(feats, "make_memory", Memory)
+    enc = getattr(feats, "encode_from_memory", lambda obs, mem: feats.encode(obs, mem.last_seen))
+    return make_memory, enc, feats.legal_indices, feats.move_index
+
+
 def teacher_move(engine, game, nodes):
     for mv in game.legal_uci():
         if game.board.piece_type_at(chess.parse_square(mv[2:4])) == chess.KING:
@@ -44,7 +63,8 @@ def teacher_move(engine, game, nodes):
 
 
 def worker(args):
-    wid, n_games, nodes, keep, out, seed = args
+    wid, n_games, nodes, keep, out, seed, agent_dir = args
+    make_memory, enc, legal_idx, move_idx = load_encoding(agent_dir)
     rng = random.Random(seed + wid)
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path())
     engine.configure({"Threads": 1, "Hash": 16})
@@ -60,7 +80,7 @@ def worker(args):
         players = {"white": bots[a], "black": bots[b]}
         players["white"].reset("white", rng.randrange(1 << 30))
         players["black"].reset("black", rng.randrange(1 << 30))
-        mem = {"white": Memory(), "black": Memory()}
+        mem = {"white": make_memory(), "black": make_memory()}
         game = Game()
         while not game.over:
             obs = game.observation()
@@ -72,9 +92,9 @@ def worker(args):
                     if len(label) == 5:
                         label = label[:4] + "q"
                     mask = np.zeros(N_MOVES, np.uint8)
-                    mask[list(legal_indices(obs))] = 1
-                    xs.append(encode(obs, mem[c].last_seen))
-                    ys.append(move_index(label, c))
+                    mask[list(legal_idx(obs))] = 1
+                    xs.append(enc(obs, mem[c]))
+                    ys.append(move_idx(label, c))
                     legals.append(np.packbits(mask))
             game.play(players[c].act(obs))
         if (g + 1) % 50 == 0:
@@ -95,10 +115,12 @@ def main():
     ap.add_argument("--keep", type=float, default=0.5, help="fraction of positions kept")
     ap.add_argument("--out", default="data/imitation")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--agent-dir", default=None,
+                    help="encode inputs with this agent's features.py (default: agents/baseline)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     per = [args.games // args.workers + (1 if i < args.games % args.workers else 0) for i in range(args.workers)]
-    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed) for i in range(args.workers)]
+    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed, args.agent_dir) for i in range(args.workers)]
     with mp.get_context("spawn").Pool(args.workers) as pool:
         n = sum(pool.map(worker, jobs))
     print(f"wrote {n} positions to {args.out}")
