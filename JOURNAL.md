@@ -120,3 +120,55 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
 - **AI help:** Claude Code ran the data generation, diagnosed and stopped the hung run, added
   `--save-best`, trained and evaluated the models, wrote the model card and drafted the facts
   in this entry.
+
+### 2026-11-06: fading memory (Idea 1)
+*(Drafted by Claude Code from the run output; edited by Isaiah.)*
+- **Question / hypothesis:** The baseline's memory marks every enemy piece it has seen at full strength until that square is seen again, so a sighting from 20 turns ago looks as reliable as one from last turn. If old sightings fade (lose strength each turn), the network can tell fresh information from stale guesses and should play better.
+- **Commit:** run on `3b7ee59` plus the uncommitted `--agent-dir` flag in
+  `baselines/imitation/generate_data.py` and the uncommitted `agents/memory_age/`.
+- **Setup:**
+  - Memory (`agents/memory_age/memory.py`): the same three rules as `fow.memory.Memory`, plus
+    the ply each remembered piece was last seen. Age = own turns since it was seen.
+  - Encoding (`features.py`): memory planes 13-18 hold `max(1, round(255 * DECAY ** age))`
+    instead of 1. With DECAY 0.85 a sighting keeps 52% of its strength after 4 turns; with
+    0.6 it keeps 13%. The model divides these planes by 255, so the network is unchanged.
+  - Data: the generator now takes `--agent-dir` to encode positions with an agent's own
+    features. Without the flag the output is byte-identical to before, and the 11 tests pass.
+    I replayed the exact games, labels and train/validation split of the earlier runs (only
+    the memory planes differ):
+    - 20K: `--games 20000 --workers 12 --seed 1` (405,888 positions).
+    - 75K: `--games 100000 --workers 12 --seed 2`, keeping the 9 shards `baseline_75k` used
+      (1,520,478 positions). Part of shard 7's labels came out different from the original
+      run (23,498 labels, from 63.8% of the way through), so I used the original labels there.
+    - DECAY 0.6: re-encoded the 0.85 data (the stored value tells you the age), 39 s, no new games.
+  - Training: 64x4 with the same settings as the model it is compared with (20K: 8 epochs;
+    75K: 16 epochs with `--save-best`, seed 0), about 12 min per 75K run on the RTX 3060 Ti.
+  - Evaluation: 200 games each against bot:greedy, bot:guess-sf-4x500 and bot:guess-sf-16x1000
+    on fresh arena seeds, the same seed for every model compared, plus head-to-head games.
+- **Result:**
+  | Model | Fade | Data | Epoch (best) | Validation match | Seed | vs greedy | vs guess-sf-4x500 | vs guess-sf-16x1000 | Rating (95%) |
+  |---|---|---|---|---:|---|---:|---:|---:|---|
+  | 64x4 | none | 20K | 8 | 40.2% | 3 | 162 | 162 | 136 | 1315 [1279, 1353] |
+  | 64x4 | 0.85 | 20K | 8 | 40.3% | 3 | 173 | 162 | 135 | 1333 [1298, 1372] |
+  | `baseline_75k` | none | 75K | 12 | 42.1% | 4 | 173 | 160 | 140 | 1338 [1296, 1372] |
+  | 64x4 | 0.85 | 75K | 10 | 42.0% | 4 | 175 | 175 | 148 | 1388 [1359, 1423] |
+  | `baseline_75k` | none | 75K | 12 | 42.1% | 5 | 170 | 165 | 139 | 1340 [1306, 1369] |
+  | 64x4 | 0.85 | 75K | 10 | 42.0% | 5 | 174 | 167 | 139 | 1351 [1318, 1385] |
+  | `baseline_75k` | none | 75K | 12 | 42.1% | 6 | 165 | 170 | 143 | 1348 [1310, 1374] |
+  | 64x4 | 0.85 | 75K | 10 | 42.0% | 6 | 169 | 172 | 142 | 1357 [1326, 1392] |
+  | 64x4 | 0.6 | 75K | 12 | 42.0% | 6 | 173 | 173 | 140 | 1363 [1320, 1396] |
+
+  Scores are out of 200.
+  - **Against the bots, fading leans slightly better:** +18 (20K), then +50, +11 and +9 Elo
+    on three seeds at 75K. On seeds 4 and 5 combined, fade 0.85 scored 978 / 1200 against
+    the baseline's 947. Every interval overlaps.
+  - **Head to head, it is a tie:** fade 0.85 vs `baseline_75k` 510.5 / 1000 (51.1%, noise is
+    about ±3%). At 20K, 217 / 400 (54%).
+  - **The fade rate does not matter:** fade 0.6 vs fade 0.85 490 / 1000 (49%), and 1363 vs 1357
+    on the same seed.
+  - **Validation match did not move:** 42.0-42.1% for all three 75K models.
+- **What surprised me:** I was surprised the memory did not change but I belive it will be useful in the future.
+- **Decision:** Keep and test in future models.
+- **AI help:** Claude Code wrote the fading memory and the `--agent-dir` flag, regenerated
+  and re-encoded the data, found and fixed the shard 7 label mismatch, trained and evaluated
+  the models and drafted the facts in this entry.
