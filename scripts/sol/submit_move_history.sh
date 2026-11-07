@@ -29,11 +29,19 @@ set -u
 echo "python: $(command -v python)"
 python -c "import fow, torch, chess, safetensors" || { echo "the fow environment is missing packages"; exit 1; }
 
-BIN=$(find "$PWD/stockfish" -type f -name 'stockfish-ubuntu-x86-64-avx2' 2>/dev/null | head -n 1 || true)
+# Stockfish 19, the version used for the local runs. scripts/get_stockfish.sh asks for an asset
+# name that recent releases no longer have, so download the release file directly.
+SF_URL=https://github.com/official-stockfish/Stockfish/releases/download/sf_19/stockfish-linux-x86-64-universal.tar.gz
+find_sf() { find "$PWD/stockfish" -type f \( -name 'stockfish-linux-x86-64-universal' -o -name 'stockfish-ubuntu-x86-64-avx2' \) 2>/dev/null | head -n 1 || true; }
+BIN=$(find_sf)
 if [ -z "$BIN" ]; then
-    echo "== downloading Stockfish"
-    bash scripts/get_stockfish.sh
-    BIN=$(find "$PWD/stockfish" -type f -name 'stockfish-ubuntu-x86-64-avx2' | head -n 1)
+    echo "== downloading Stockfish 19"
+    mkdir -p stockfish
+    curl -fsSL "$SF_URL" -o stockfish/sf19.tar.gz
+    tar -xzf stockfish/sf19.tar.gz -C stockfish
+    BIN=$(find_sf)
+    [ -n "$BIN" ] || { echo "no Stockfish binary found in stockfish/ after download"; exit 1; }
+    chmod +x "$BIN"
 fi
 export STOCKFISH=$BIN
 SF_OUT=$(echo uci | timeout 20 "$STOCKFISH" 2>&1 || true)
