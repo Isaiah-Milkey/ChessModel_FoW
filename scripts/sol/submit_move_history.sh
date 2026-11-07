@@ -17,12 +17,16 @@ fi
 
 set +u   # module and conda scripts use unset variables
 module load mamba/latest
-if ! source activate fow 2>/dev/null; then
-    echo "== first run: creating the fow environment (about 5 minutes)"
-    bash scripts/sol/setup_env.sh
-    source activate fow
+# "source activate" can return success without activating, so check which environment is active
+activate_fow() { source activate fow > /dev/null 2>&1 || true; [[ "${CONDA_PREFIX:-}" == */fow ]]; }
+if ! activate_fow; then
+    echo "== first run: creating the fow environment (about 5-10 minutes)"
+    mamba create -y -n fow python=3.11
+    activate_fow || { echo "could not activate the new fow environment; not installing anything"; exit 1; }
+    pip install -e ".[baseline]"
 fi
 set -u
+echo "python: $(command -v python)"
 python -c "import fow, torch, chess, safetensors" || { echo "the fow environment is missing packages"; exit 1; }
 
 BIN=$(find "$PWD/stockfish" -type f -name 'stockfish-ubuntu-x86-64-avx2' 2>/dev/null | head -n 1 || true)
