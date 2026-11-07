@@ -172,3 +172,51 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
 - **AI help:** Claude Code wrote the fading memory and the `--agent-dir` flag, regenerated
   and re-encoded the data, found and fixed the shard 7 label mismatch, trained and evaluated
   the models and drafted the facts in this entry.
+
+### 2026-11-06: turn number and own last 3 moves (move_history)
+*(Drafted by Claude Code from the run output; edited by Isaiah.)*
+- **Question / hypothesis:** The network only sees the current turn, so it cannot tell the
+  opening from the middlegame except through the pieces on the board, and it does not know what
+  it was just trying to do. If it is told the turn number and its own last 3 moves, it should
+  learn what to do at each stage of the game and play more consistent plans.
+- **Commit:** `56dcb56` (`agents/move_history/` code, `--record` in
+  `baselines/imitation/generate_data.py`, `baselines/imitation/reencode.py`); the trained
+  weights and model card are new.
+- **Setup:**
+  - Encoding (`agents/move_history/features.py`, `history.py`): the baseline's 22 planes
+    unchanged, plus plane 22 = ply number (capped at 100, scaled to 0..1 in `model.py`) and
+    planes 23-28 = from and to squares of the agent's own last 3 moves, flipped for Black.
+    318,089 parameters (`baseline_75k`: 314,057); only the first layer is bigger.
+  - Data: 75,000 new games, seed 3, 1,514,142 positions (`baseline_75k` had 1,520,478),
+    generated with `--record` so the games and labels were saved (50 min, 12 workers). The
+    saved games were re-encoded with the baseline encoding in 44 s, with no Stockfish, as a
+    control. Planes 0-21, labels and legal masks are identical in the two datasets.
+  - What the new planes contain: median ply 21 (about move 10), 0.6% of positions at the
+    ply cap; 95% / 90% / 85% of positions have a 1st / 2nd / 3rd previous move.
+  - Training: 64x4, 16 epochs, `--save-best`, seed 0, the same for both; 11 min each on the
+    RTX 3060 Ti.
+  - Evaluation: 200 games each against bot:greedy, bot:guess-sf-4x500 and
+    bot:guess-sf-16x1000 on arena seed 6 (the same seed as `baseline_75k` and the fade models),
+    plus 1,000 games head to head against the control.
+- **Result:**
+  | Model | Planes | Epoch (best) | Validation match | vs greedy | vs guess-sf-4x500 | vs guess-sf-16x1000 | Rating (95%) |
+  |---|---:|---|---:|---:|---:|---:|---|
+  | `move_history` | 29 | 9 | 42.0% | 173 | 173 | 135 | 1353 [1322, 1387] |
+  | control (`runs/base75k_s3`) | 22 | 9 | 42.0% | 169 | 165 | 135 | 1331 [1299, 1365] |
+  | `baseline_75k` (earlier, other data) | 22 | 12 | 42.1% | 165 | 170 | 143 | 1348 [1310, 1374] |
+
+  Scores are out of 200.
+  - **Validation match did not move:** 42.0% for both at their best epoch. `move_history`
+    reached a lower training loss (1.741 vs 1.764 at epoch 16) and dropped less after its
+    peak (41.7% vs 41.4% at epoch 16), but its best was the same.
+  - **In games it leans better:** +22 Elo against the bots (intervals overlap), and 526.5 / 1000
+    head to head against the control (+18 Elo, 95% interval [-5, +35], p about 0.09). Not
+    significant.
+  - **The control rated 17 below `baseline_75k`** with the same code and the same amount of
+    data, so a different set of training games alone moves the rating by about as much as
+    the new planes did.
+- **What surprised me:** I believe the model is overfitting on Stockfish's moves.
+- **Decision:** Next I will implement training techniques to make the model more generalized.
+- **AI help:** Claude Code wrote the `move_history` agent, the `--record` flag and
+  `reencode.py`, generated and checked the data, trained both models, ran the evaluations,
+  wrote the model card and drafted the facts in this entry.
