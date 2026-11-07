@@ -8,13 +8,19 @@ Inputs are encoded with agents/baseline/features.py and fow.memory.Memory. With 
 they use that agent's features.py instead, and its make_memory() and encode_from_memory(obs,
 memory) when it defines them, so the training inputs match what that agent sees in play.
 
+With --record, each worker also writes games_<seed>_<worker>.jsonl.gz: one line per game with
+its moves and the teacher label of every kept position. reencode.py turns those into shards
+for any agent's encoding without running Stockfish again.
+
 Writes one .npz shard per worker with
     x      uint8 [N, 22, 8, 8]   input planes (see agents/baseline/features.py)
     y      int16 [N]             teacher move index
     legal  uint8 [N, 512]        packed bit mask of legal move indices
 """
 import argparse
+import gzip
 import importlib.util
+import json
 import multiprocessing as mp
 import os
 import random
@@ -63,13 +69,14 @@ def teacher_move(engine, game, nodes):
 
 
 def worker(args):
-    wid, n_games, nodes, keep, out, seed, agent_dir = args
+    wid, n_games, nodes, keep, out, seed, agent_dir, record = args
     make_memory, enc, legal_idx, move_idx = load_encoding(agent_dir)
     rng = random.Random(seed + wid)
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path())
     engine.configure({"Threads": 1, "Hash": 16})
     bots = {}
     xs, ys, legals = [], [], []
+    games = []
     for g in range(n_games):
         a, b = rng.choice(MATCHUPS)
         if rng.random() < 0.5:
@@ -82,6 +89,7 @@ def worker(args):
         players["black"].reset("black", rng.randrange(1 << 30))
         mem = {"white": make_memory(), "black": make_memory()}
         game = Game()
+        moves, labels = [], []
         while not game.over:
             obs = game.observation()
             c = obs["color"]
@@ -96,7 +104,12 @@ def worker(args):
                     xs.append(enc(obs, mem[c]))
                     ys.append(move_idx(label, c))
                     legals.append(np.packbits(mask))
-            game.play(players[c].act(obs))
+                    labels.append([obs["ply"], label])
+            mv = players[c].act(obs)
+            moves.append(mv)
+            game.play(mv)
+        if record:
+            games.append({"white": a, "black": b, "moves": moves, "labels": labels})
         if (g + 1) % 50 == 0:
             print(f"worker {wid}: {g + 1}/{n_games} games, {len(ys)} positions", flush=True)
     engine.quit()
@@ -104,6 +117,10 @@ def worker(args):
         bot.close()
     path = os.path.join(out, f"shard_{seed}_{wid}.npz")
     np.savez_compressed(path, x=np.stack(xs), y=np.array(ys, np.int16), legal=np.stack(legals))
+    if record:
+        with gzip.open(os.path.join(out, f"games_{seed}_{wid}.jsonl.gz"), "wt") as f:
+            for rec in games:
+                f.write(json.dumps(rec) + "\n")
     return len(ys)
 
 
@@ -117,10 +134,12 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--agent-dir", default=None,
                     help="encode inputs with this agent's features.py (default: agents/baseline)")
+    ap.add_argument("--record", action="store_true",
+                    help="also save every game's moves and teacher labels, for reencode.py")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     per = [args.games // args.workers + (1 if i < args.games % args.workers else 0) for i in range(args.workers)]
-    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed, args.agent_dir) for i in range(args.workers)]
+    jobs = [(i, per[i], args.nodes, args.keep, args.out, args.seed, args.agent_dir, args.record) for i in range(args.workers)]
     with mp.get_context("spawn").Pool(args.workers) as pool:
         n = sum(pool.map(worker, jobs))
     print(f"wrote {n} positions to {args.out}")
