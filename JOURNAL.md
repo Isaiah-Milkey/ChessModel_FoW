@@ -392,3 +392,116 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
 - **Decision:** I'm not a massive fan of value head but it improves elo so i'll explore it more.
 - **AI help:** Claude Code wrote `value.py` and the value-head option of `finetune.py`, trained
   and evaluated the models and drafted the facts in this entry.
+
+### 2026-11-15: a transformer over the game's turns (Idea 3), and how much data helps
+*(Facts drafted by Claude Code from the run output; surprises and decision to be written by Isaiah.)*
+- **Question / hypothesis:** The CNN sees one turn at a time; its only memory is the hand-made
+  planes. A small transformer that reads a summary of every earlier turn of the game should let
+  the agent use what it saw before: pieces that appeared and vanished into the fog, where the
+  opponent has been active.
+- **Commit:** `agents/turn_transformer/` and `baselines/sequence/` are added in the same commit as
+  this entry; the data is `move_history_branch`'s branching games (see its model card).
+- **Setup:**
+  - Model (`agents/turn_transformer/model.py`, 805,802 parameters, under the 1M size floor):
+    `move_history_branch`'s CNN reads each turn; each turn is squeezed into 128 numbers; a
+    2-layer causal transformer (4 heads) reads those for the agent's last 64 turns at most; its
+    output scales and shifts the current turn's CNN features before the move head (starts at
+    zero, so training starts from a plain CNN). 4.4e7 FLOPs per move on average, VALID.
+  - Data (`encode_seq.py`): the same 54,000 branching games, replayed in order, one sequence per
+    side: 108,000 sequences, 2.25M turns, 1.51M with a Stockfish label (the rest are context).
+  - Training (`train_seq.py`): 16 epochs, loss on the labelled turns, 5% of games held out; a
+    control trained the same CNN without the transformer on exactly the same batches.
+  - Evaluation: 200 games against each bot on arena seeds 6 and 7; 1,000 games head to head per
+    seed.
+- **Result:**
+
+  | Model | Held-out match | Rating vs bots, 1,200 games |
+  |---|---:|---|
+  | control (no transformer) | 39.3% | 1377 [1348, 1403] |
+  | `move_history_branch` (same games, earlier recipe) | - | 1414 [1385, 1440] |
+  | value-head fine-tune (`runs/ft_vppo_l08`) | - | 1428 [1401, 1458] |
+  | **turn_transformer** | **40.1%** | **1450 [1422, 1482]** |
+
+  - Head to head, the transformer scored 1087 / 2000 against the control (54.4%, about +30
+    Elo), 1194.5 / 2000 against `move_history_branch` (59.7%, about +68) and 1138 / 2000 against
+    the value-head fine-tune (56.9%, about +48). Both seeds agreed each time.
+  - The control rated below `move_history_branch` with the same network and games: batches
+    built from whole games and holding out whole games seem to train a slightly worse plain
+    CNN. The comparison with the transformer is still fair, because both were trained that way.
+- **How much data helps** (same held-out games and number of steps):
+
+  | Training games | Held-out match | Best epoch | Rating, 1,200 games |
+  |---|---:|---|---|
+  | 25% (12,825) | 37.7% | 9 of 64 | 1369 [1347, 1393] |
+  | 50% (25,650) | 39.0% | 10 of 32 | 1393 [1368, 1422] |
+  | 100% (51,300) | 40.1% | 11 of 16 | 1450 [1422, 1482] |
+  | 100% + 75,000 older games | 40.9% | 15 of 16 | 1461 [1430, 1493] |
+
+  - More of the agent's own branching games still helps, and is not flattening yet. The
+    smaller runs overfit hard: the 25% run fell from 37.7% to 33.5% after its peak.
+  - The 75,000 older games (`data/rec75k_s3`, played by `move_history` without branching) raised
+    the teacher match but lost head to head against the model without them, 927 / 2000. Data
+    from positions the agent actually reaches matters more than more teacher answers.
+- **What surprised me:** I was not that surprised that a transformer increased performance.
+- **Decision:** Grow the transformer and learn from FoW games instead of a stock fish teacher.
+- **AI help:** Claude Code wrote the sequence encoder, the turn-transformer model and agent, the
+  training script and its data options, trained and evaluated the models, wrote the model card
+  and drafted the facts in this entry.
+
+### 2026-11-16: deeper CNN, and learning from FoW games instead of the teacher
+*(Facts drafted by Claude Code from the run output; surprises and decision to be written by Isaiah.)*
+- **Question / hypothesis:** (1) Now that the model reads whole games, does a deeper CNN help?
+  (2) Imitating Stockfish is capped by a teacher who sees the whole board. Can the turn
+  transformer improve by learning only from the results of its own Fog-of-War games, without
+  overfitting to old games or to the three bots?
+- **Commit:** `agents/turn_transformer_rl/`, `baselines/fow_games/rl_loop.py` and
+  `baselines/guard.py` are added with this entry.
+- **Deeper CNN:** 6 residual blocks instead of 4 (954,286 parameters), same data and settings.
+  Held-out match 40.4% (4 blocks: 40.1%), rating 1431 [1404, 1464] (4 blocks: 1450), head to
+  head 1019 / 2000 against `turn_transformer`: a tie. Kept 4 blocks.
+- **Setup of the learning loop** (`rl_loop.py`, details in `baselines/fow_games/README.md` and
+  the model card):
+  - Start and anchor: `agents/turn_transformer`. No Stockfish labels.
+  - Each round: 6,000 new games, 75% against the three bots and 25% against the last 3 saved
+    rounds; the learner samples at temperature 0.5. Buffer: the last 2 rounds of games.
+  - PPO (clip 0.2) with advantages from a value network (GAE λ 0.8), plus 0.1 × KL(start ‖
+    current). The value network was warmed up on 60,000 recorded games (`data/fow_games`).
+  - Every 2 rounds: 600 games against the bots on seed 9 to pick the best round; stop after 3
+    ratings without a new best. Then confirm on seeds 6 and 7 and head to head.
+  - The PC blue-screened on the first attempt (game workers and GPU training at the same time).
+    Since then every long job holds a lock and pauses while memory is low (`baselines/guard.py`),
+    and the loop resumes from its last finished round (`--resume`).
+- **Result:**
+
+  | Round | 2 | 4 | 6 | 8 | 10 | 12 | 14 |
+  |---|---:|---:|---:|---:|---:|---:|---:|
+  | Rating, seed 9 (600 games) | 1434 | 1498 | 1542 | **1550** | 1522 | 1512 | 1522 |
+
+  - Round 8 (`agents/turn_transformer_rl`) on seeds 6 and 7: **1519 [1488, 1553]** (379 / 374 /
+    339 of 400) against `turn_transformer`'s 1450 [1422, 1482]. Head to head against
+    `turn_transformer`: 619 + 633 = **1252 / 2000 (62.6%, about +90 Elo)**.
+  - The KL to the starting model reached only 0.04; 3-5% of ratios were clipped; no draws.
+- **Overfitting to the bots?** The gains were larger against agents it never played while
+  learning (1,000 games each on seed 6): 736 against `move_history_branch`, 694 against the
+  value-head fine-tune, 701 against the transformer's control, 905.5 against `agents/baseline`.
+  Against bots it never played: 199 / 200 against bot:random, 184 against bot:naive-sf, 178
+  against bot:guess-sf-32x4000 (more search did not make that bot stronger).
+- **Where the losses come from** (every lost game against the bots, 1,200 games per model,
+  classified by the position before our last move):
+
+  | Model | Losses | Already attacked by a hidden piece | King stepped into a hidden attack | Left attacked by a visible piece | Another move opened a line |
+  |---|---:|---:|---:|---:|---:|
+  | turn_transformer_rl | 108 | 64 | 29 | 9 | 6 |
+  | turn_transformer | 152 | 58 | 80 | 3 | 11 |
+  | value-head fine-tune | 169 | 75 | 71 | 12 | 11 |
+  | move_history_branch | 181 | 81 | 80 | 4 | 16 |
+  | control | 214 | 95 | 96 | 9 | 14 |
+
+  No model ever missed a chance to capture the enemy king or stepped into an attack it could
+  see. About half of every model's losses are against guess-sf-16x1000, and about 85% come
+  after ply 20. Learning from its own games mostly removed the king-steps-into-a-hidden-attack
+  losses (80 to 29).
+- **What surprised me:** Training on FoW games increased performance greatly.
+- **Decision:** Loss mostly comes from late games- so I will fine-tune for that.
+- **AI help:** Claude Code wrote the learning loop, the guard and the loss analysis, ran the
+  experiments one at a time, wrote the model card and drafted the facts in this entry.

@@ -32,6 +32,8 @@ Two or three concrete ideas. For each one:
     This should help the model make more informed decisions.
 - **How you will measure it:** which matches, how many games, compared against what.
     I will compare this to the baseline model and see how many games it wins compared to the standard bot against the stockfish trained one.
+- **Outcome (11/6, see JOURNAL.md):** tested as a fading memory (`agents/memory_age`): a tie
+  (510.5 / 1000 head to head against `baseline_75k`).
 
 ### Idea 2:
 - **What:**
@@ -40,6 +42,8 @@ Two or three concrete ideas. For each one:
     The model currently is under the max limit of parameters, so it is able to be scaled up. Larger models with more data generally performs better.
 - **How you will measure it:**
     I will compare this to the baseline model and see how many games it wins compared to the standard bot against the stockfish trained one.
+- **Outcome (11/5-11/6):** more data helped (+140 Elo, to `baseline_75k`); a 4x bigger network
+  did not play better at any data size.
 
 ### Idea 3: sequential learning (added 11/7/26, drafted with Claude Code)
 - **What:**
@@ -65,10 +69,13 @@ Two or three concrete ideas. For each one:
     dropout 0.1), validation on held-out views it never trained on (`train.py --split view`), then
     200 games each against bot:greedy, bot:guess-sf-4x500 and bot:guess-sf-16x1000 on the same
     arena seed, plus 1,000 games head to head.
+- **Update (11/15):** not started. The FoW games dataset (`baselines/fow_games`) already keeps
+  every turn of each game in order, so step 2 can train on it with no new data. Compare against
+  the current best (`move_history_branch` or its fine-tuned version).
 
 ### Idea 4: fine-tune on games against the FoW bots (added 11/7/26, drafted with Claude Code)
 - **What:**
-    Start from the best model so far (the branching-games model, `runs/mh_drop10_branch`, 1401)
+    Start from the best model so far (the branching-games model, now `agents/move_history_branch`, 1409)
     and fine-tune it on games it plays against the Fog-of-War bots (bot:greedy,
     bot:guess-sf-4x500, bot:guess-sf-16x1000), instead of only copying the teacher. The model
     learns from how its own games turned out: the moves it played in games it won are made more
@@ -89,6 +96,10 @@ Two or three concrete ideas. For each one:
     as every model since `move_history`), plus 1,000 games head to head against the
     branching-games model it started from. Also watch that it does not just learn to exploit one
     bot: compare the score against each bot separately.
+- **Outcome (11/7, see JOURNAL.md):** judging moves by the game result alone gave no gain (even
+  head to head over 2,000 games). Adding a value head, so each move is judged by how the
+  predicted result changed after it (lambda 0.8), beat `move_history_branch` 54.5% over 3,000
+  games (+31 Elo, `runs/ft_vppo_l08`).
 
 ## 3. Compute plan
 
@@ -96,6 +107,11 @@ What you expect to run on Sol: data generation, training runs, rough GPU-hours. 
 pipeline will stay reproducible in hours, not days.
 
 Data generation will be reproducible and stored on the Github so a dataset can be generated and reused for later training. Training will be done on SOL until the model flattens in performance.
+
+**Update (11/15):** so far everything has run on my own PC (RTX 3060 Ti, 16 CPU threads): data
+generation on the CPU (50-80 min per dataset) and training runs of about 1-12 min each on the
+GPU. This is allowed, but the hardware and its GPU-hours must be listed in `submission/MODEL.md`.
+Each entry's full pipeline should still be checked on Sol with `reproduce.sh` before submitting.
 
 ## 4. Risks and questions
 
@@ -133,3 +149,12 @@ What we learned:
 
 Next: fine-tune the best model on games against the FoW bots, learning from the game results
 (Idea 4).
+
+# 11/15/26
+What we learned:
+- Learning from game results works only with a value head. Judging every move by the final result
+  of its game gave no gain; judging each move by how the predicted result changed right after it
+  gave +31 Elo over `move_history_branch` (54.5% of 3,000 games).
+- Check gains on more than one seed: one 1,000-game result (531.5) disappeared on the next seed.
+Next:
+- I want to look into adding a transformer/replacing the CNN. We learned a larger scale doesn't necessarily help with performance. Transformers are better contextually than visually. IMO FoW is a more pattern based game than vision based. Maybe both would improve performance. Using moves and vision as context.
