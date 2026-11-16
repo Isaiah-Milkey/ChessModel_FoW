@@ -16,6 +16,12 @@ each game ended. It is meant for:
 |---|---|
 | `play_games.py` | plays the games and saves them (`games_*.jsonl.gz`), then encodes them (`shard_*.npz`) and writes `meta.json` |
 | `encode_games.py` | re-encodes saved games for any agent's `features.py`, with no bots and no Stockfish |
+| `value.py` | trains a value head (predicts the game result from a position and the opponent) on the policy's frozen trunk; used only in training |
+| `finetune.py` | fine-tunes a policy on the games from their results (clipped policy gradient with a KL penalty to the starting policy), optionally judging moves with the value head (`--value`, `--lam`) |
+
+Best result so far (see JOURNAL.md, 2026-11-07): value head, then
+`finetune.py --method ppo --gamma 1 --kl 0.1 --value runs/value_opp --lam 0.8 --epochs 2`
+beat the starting `move_history_branch` 54.5% over 3,000 games (+31 Elo).
 
 ```bash
 export STOCKFISH=/path/to/stockfish

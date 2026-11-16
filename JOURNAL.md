@@ -288,8 +288,107 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
     middlegame and endgame positions. The earlier data came only from bots playing each
     other. A different set of training games alone moved the rating by about 20 before, far
     less than this.
-- **What surprised me:** _(to fill in)_
-- **Decision:** _(to fill in)_
+- **What surprised me:** I was surprised that dropout didn't help as I'd expect the model to generalize more. I believe that this may be because the model we're learning from is stockfish which sees the board when our model doesn't.
+- **Decision:** Continue with branching learning.
 - **AI help:** Claude Code added dropout, the view split, merging and the branching-game
   options, measured the repeated positions, generated the branching data, trained and
   evaluated the models and drafted the facts in this entry.
+
+### 2026-11-07: fine-tuning on games against the bots (Idea 4)
+*(Drafted by Claude Code from the run output; edited by Isaiah.)*
+- **Question / hypothesis:** Training strictly to the teacher is not good, because Stockfish
+  sees the whole board. Fine-tuning the best model on the results of its own Fog-of-War games
+  against the reference bots should teach it what actually wins in the fog.
+- **Commit:** `749e3b1` (`baselines/fow_games/play_games.py` and `encode_games.py`, the game
+  dataset). `baselines/fow_games/finetune.py` is added in the same commit as this entry.
+- **Setup:**
+  - Dataset (`data/fow_games`, 52 min on 12 CPU workers, no Stockfish labels):
+    `move_history_branch` played 60,000 games against bot:greedy, bot:guess-sf-4x500 and
+    bot:guess-sf-16x1000 (20,000 each, half with each colour, dataset seed 100, so no game
+    is shared with the arena seeds). Every agent turn is kept in order: 1,025,951 turns,
+    median game 31 plies. It sampled every move at temperature 0.5 (600-game tests: 0.5
+    stays close to its real strength while trying other moves; 1.0 played far worse). It
+    scored 85% / 84% / 71% against the three bots, so 26% of turns come from lost games.
+  - Fine-tuning (`finetune.py`): start from `move_history_branch`; each move gets the advantage
+    A = (game result - the agent's average result against that opponent with that colour),
+    optionally times gamma per turn before the end; plus 0.1 x KL(start || current) to stay
+    close to the starting model; 2 epochs, AdamW lr 5e-5, batch 512, network in eval mode
+    (no dropout, batch-norm frozen); 5% of games held out. About 70 s per run on the
+    RTX 3060 Ti.
+  - Methods: plain policy gradient; PPO-style clipped policy gradient (clip 0.2), with whole-game
+    credit (gamma 1) and more credit near the end (gamma 0.95); advantage-weighted imitation
+    (AWR, beta 0.5).
+  - Evaluation: 200 games each against the three bots on arena seeds 6 and 7 (1,200 games),
+    and 1,000 games head to head against `move_history_branch` on seeds 6 and 7.
+- **Result:**
+  | Model | Top move changed (held out) | Rating vs bots, 1,200 games | Head to head vs start, seed 6 / seed 7 | Both |
+  |---|---:|---|---:|---:|
+  | `move_history_branch` (start) | - | 1414 [1388, 1443] | - | - |
+  | plain policy gradient | diverged | - | - | - |
+  | PPO, gamma 1 | 5.5% | 1421 [1393, 1453] | 524 / 476.5 | 50.0% |
+  | PPO, gamma 0.95 | 5.2% | 1417 [1385, 1446] | 531.5 / 492 | 51.2% |
+  | AWR | 5.8% | 1420 [1390, 1448] | 489 / - | 48.9% |
+
+  Head-to-head scores are the fine-tuned model's, out of 1,000.
+  - **Plain policy gradient diverged:** it pushed the moves of lost games down without limit
+    (held-out KL 5.0 after one epoch, then values in the millions). Clipping fixed it.
+  - **No gain in games:** every fine-tuned model is within a few points of the start against
+    the bots, and head to head over 2,000 games they are even (the best, +8 Elo, is within
+    noise). The PPO gamma-0.95 model looked better after the first 1,000 games (531.5) but
+    not after the second (492).
+  - **It did learn something small that carries over:** on held-out games, PPO with gamma 1
+    made moves from won games more likely (+0.035 log-probability) and moves from lost games
+    less likely (-0.016). AWR raised both by about +0.2: it mostly copied its own sampled moves.
+  - **Likely reasons:** one result per game is spread over about 17 moves, and the baseline
+    only knows the opponent and colour, not how good the position was, so most of the signal
+    is noise; the clipping keeps changes small (the top move changed in about 5% of
+    positions); only about 15,000 lost games.
+- **What surprised me:** I was surprised the dataset didn't help train the model better.
+- **Decision:** Stop this version and add a value head: a network that predicts the result of
+  the game from each position, so each move is judged against how good its position was.
+- **AI help:** Claude Code wrote the dataset generator and `finetune.py`, generated the games,
+  ran the fine-tuning and evaluations and drafted the facts in this entry.
+
+### 2026-11-07: fine-tuning with a value head
+*(Drafted by Claude Code from the run output; edited by Isaiah.)*
+- **Question / hypothesis:** Fine-tuning on game results did not help because one result per
+  game is spread over all its moves. A value head that predicts the result from each position
+  should let each move be judged against how good its position was.
+- **Commit:** data at `749e3b1`; `baselines/fow_games/value.py` and the `--value` / `--lam`
+  options of `finetune.py` are added in the same commit as this entry.
+- **Setup:**
+  - Value head (`value.py`): on the frozen trunk of `move_history_branch` (stem and residual
+    blocks), conv 1x1 to 32 channels, 2048 -> 128, plus a learned vector for the opponent
+    (known during training), -> 1 with tanh; 264,897 trainable parameters; trained 3 epochs to
+    predict the result (MSE), on the same games and held-out split as the fine-tuning. Used
+    only during training, so the agent does not change size.
+  - Fine-tuning: as in the previous entry (PPO clip 0.2, KL 0.1, 2 epochs, lr 5e-5), but each
+    move's advantage is generalized advantage estimation from the value head:
+    delta = V(next own turn) - V(this turn), with the game result after the last turn, and
+    A = sum of (lambda)^k delta over the following turns. lambda 1 = result minus the
+    position's value; lambda 0.8 leans on the change in value over the next few turns.
+  - Evaluation: 200 games each against the three bots on arena seeds 6 and 7, and 1,000
+    games head to head against `move_history_branch` per seed.
+- **Result:**
+  - **The value head is weak but helps:** held-out error 0.638 against 0.730 for the
+    opponent-and-colour baseline; it calls the result right 77.9% of the time (always guessing
+    a win: 74%). Without the opponent input: 0.648; training a copy of the trunk too: 0.645.
+    Its error is lowest early in the game (0.59 before ply 20) and highest late (0.71).
+
+  | Model | Rating vs bots, 1,200 games | Head to head vs `move_history_branch` (per 1,000) | Total |
+  |---|---|---|---:|
+  | `move_history_branch` (start) | 1414 [1388, 1443] | - | - |
+  | value head, lambda 1 | 1437 [1408, 1467] | 524 / 512 (seeds 6, 7) | 51.8% of 2,000 |
+  | **value head, lambda 0.8** (`runs/ft_vppo_l08`) | 1428 [1402, 1457] | **550 / 531.5 / 552** (seeds 6, 7, 8) | **54.5% of 3,000** |
+
+  - **lambda 0.8 is a clear gain:** 1,633.5 / 3,000 head to head, +31 Elo (95% interval
+    about +18 to +44), consistent on all three seeds. Against the bots both value-head models
+    lean higher than the start, but the intervals overlap.
+  - **lambda 1 is within noise** (+12 Elo over 2,000 games), like the fine-tuning without a
+    value head. Judging a move by the change in value right after it, rather than by the
+    final result, is what made the difference.
+  - The changes are still small: the top move changed in 7.2% of held-out positions.
+- **What surprised me:** Position and context are better things to train on then final game result.
+- **Decision:** I'm not a massive fan of value head but it improves elo so i'll explore it more.
+- **AI help:** Claude Code wrote `value.py` and the value-head option of `finetune.py`, trained
+  and evaluated the models and drafted the facts in this entry.
