@@ -158,3 +158,25 @@ What we learned:
 - Check gains on more than one seed: one 1,000-game result (531.5) disappeared on the next seed.
 Next:
 - I want to look into adding a transformer/replacing the CNN. We learned a larger scale doesn't necessarily help with performance. Transformers are better contextually than visually. IMO FoW is a more pattern based game than vision based. Maybe both would improve performance. Using moves and vision as context.
+
+# 11/16/26
+What we learned:
+- Learning from FoW games works: `agents/turn_transformer_rl` (8 rounds of the learning loop) rated
+  1519 against the bots (turn_transformer: 1450) and won 62.6% head to head against
+  turn_transformer. It gained even more against models it never trained against, so it is not
+  just learning the three bots.
+- Losses come from the fog, late in the game. In nearly every loss the king was taken by a piece
+  the agent could not see, usually a queen or rook from far away. Per ply, it loses about 5x more
+  often after ply 50 than in plies 21-50.
+
+Next:
+- Keep the king safer. Look into a danger heatmap: for every square, how likely an unseen enemy
+  piece attacks it, built from what the agent has seen (remembered pieces, squares it can't see,
+  lines a hidden queen, rook or bishop could reach). Give it to the network as extra input planes,
+  and/or train it as an extra output against the true board (which the recorded games have), so
+  the model learns where hidden attacks come from. Check: fewer losses to hidden checks and to the
+  king stepping into hidden attacks.
+- Teach deeper games. The current model fails in the late game, so fine-tune for it: start
+  learning-loop games from mid-game positions (plies 30-60 of earlier games, with the moves before
+  played through the agent so its memory is built) and give long games more weight. Check: the
+  loss rate per 100 plies after ply 50 (now 1.96), not only the rating.
