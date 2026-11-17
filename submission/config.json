@@ -1,5 +1,10 @@
 {
- "in_planes": 22,
+ "in_planes": 29,
  "channels": 64,
- "blocks": 4
+ "blocks": 4,
+ "d_model": 128,
+ "layers": 2,
+ "heads": 4,
+ "context": 64,
+ "use_context": true
 }

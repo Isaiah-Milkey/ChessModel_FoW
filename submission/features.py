@@ -1,7 +1,7 @@
 """Turn an observation (plus memory) into network input, and moves into policy indices.
 
 Board orientation: the board is flipped for Black, so the side to move always plays "up".
-Input planes (22 x 8 x 8):
+Input planes (29 x 8 x 8):
    0-5   your pawns, knights, bishops, rooks, queens, king
    6-11  enemy pieces you can see now (same order)
    12    squares you can see
@@ -9,13 +9,23 @@ Input planes (22 x 8 x 8):
    19    your kingside castling right (all ones or all zeros)
    20    your queenside castling right
    21    the square where you lost a piece on the opponent's last move
+   22    turn number: min(ply, PLY_CAP) on every square (model.py divides by PLY_CAP)
+   23-24 from and to square of your previous move
+   25-26 from and to square of your move before that
+   27-28 from and to square of your move 3 turns ago
+Planes 0-21 are the same as agents/baseline. Planes stay uint8.
 Moves: index = from_square * 64 + to_square (oriented). Promotions always use the queen.
 """
 import numpy as np
 
+from history import N_MOVES_KEPT, HistoryMemory
+
 ORDER = "PNBRQK"
-N_PLANES = 22
+N_PLANES = 29
 N_MOVES = 64 * 64
+TURN_PLANE = 22
+MOVE_PLANES = 23
+PLY_CAP = 100   # the turn plane is 1.0 from ply 100 (move 50) on
 
 
 def sq_index(name: str) -> int:
@@ -26,7 +36,15 @@ def orient(sq: int, color: str) -> int:
     return sq if color == "white" else sq ^ 56
 
 
-def encode(obs: dict, last_seen: dict) -> np.ndarray:
+def make_memory() -> HistoryMemory:
+    return HistoryMemory()
+
+
+def encode_from_memory(obs: dict, mem: HistoryMemory) -> np.ndarray:
+    return encode(obs, mem.last_seen, mem.own_moves)
+
+
+def encode(obs: dict, last_seen: dict, own_moves: list) -> np.ndarray:
     c = obs["color"]
     x = np.zeros((N_PLANES, 64), np.uint8)
     for s, t in obs["own"].items():
@@ -43,6 +61,10 @@ def encode(obs: dict, last_seen: dict) -> np.ndarray:
         x[20] = 1
     if obs.get("lost_on"):
         x[21, orient(sq_index(obs["lost_on"]), c)] = 1
+    x[TURN_PLANE] = min(obs["ply"], PLY_CAP)
+    for k, mv in enumerate(own_moves[:N_MOVES_KEPT]):
+        x[MOVE_PLANES + 2 * k, orient(sq_index(mv[0:2]), c)] = 1
+        x[MOVE_PLANES + 2 * k + 1, orient(sq_index(mv[2:4]), c)] = 1
     return x.reshape(N_PLANES, 8, 8)
 
 
