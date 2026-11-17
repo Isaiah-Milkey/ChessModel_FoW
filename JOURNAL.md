@@ -505,3 +505,45 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
 - **Decision:** Loss mostly comes from late games- so I will fine-tune for that.
 - **AI help:** Claude Code wrote the learning loop, the guard and the loss analysis, ran the
   experiments one at a time, wrote the model card and drafted the facts in this entry.
+
+### 2026-11-17: fine-tuning on the positions it loses
+*(Drafted by Claude Code from the run output; reviewed by Isaiah.)*
+- **Question / hypothesis:** `turn_transformer_rl` loses mostly late in the game (1.94 losses per
+  100 plies after ply 50, against 0.08 in plies 1-20), and games that start from move 1 rarely
+  reach those positions. If half the learning games start just before positions where it lost,
+  it should lose less late, and gain rating.
+- **Commit:** the commit after `b75ecf1`: `rl_loop.py` gains `--midgame-lost` (start 10-30 plies
+  before a recorded loss, playing the losing side against the bot that won) and `--bot-weights`.
+- **Setup:**
+  - Start: `agents/turn_transformer_rl`, with the value network from its loop. The KL penalty
+    now pulls towards `turn_transformer_rl`.
+  - Each round: 6,000 games, half replaying one of 13,376 lost games of at least 30 plies from the
+    first loop (`runs/rl_tf`, 84,000 games), half from move 1. Bot games: 50% guess-sf-16x1000,
+    25% each greedy and guess-sf-4x500; 25% of all games against its last 3 rounds.
+  - Same rating and stopping rule as before: 600 games on seed 9 every 2 rounds, stop after 3
+    ratings without a new best. Then seeds 6 and 7, and 2,000 games head to head.
+  - Compute: 97 minutes for 10 rounds on the RTX 3060 Ti PC (7-8 CPU workers for games, under a
+    minute of GPU training per round), plus 5 minutes of checks. Not Sol.
+- **Result:**
+
+  | Round | 2 | 4 | 6 | 8 | 10 |
+  |---|---:|---:|---:|---:|---:|
+  | Rating, seed 9 (600 games) | 1542 | **1597** | 1550 | 1572 | 1542 |
+  | Against `move_history_branch` (never trained against) | 75.5% | 76% | 76% | 74.5% | 75.5% |
+
+  - Round 4 (`agents/turn_transformer_late`) on seeds 6 and 7: **1580 [1544, 1625]** (376 / 380 /
+    365.5 of 400) against `turn_transformer_rl`'s 1519 [1488, 1553] (379 / 374 / 339). Head to
+    head against `turn_transformer_rl`: 616 + 599 = **1215 / 2000 (60.75%, about +75 Elo)**.
+  - Losses in the same 1,200 bot games: 108 to 78. Per 100 plies: plies 1-20 0.08 to 0.05,
+    plies 21-50 0.38 to 0.34, after ply 50 1.94 to 1.35. Against guess-sf-16x1000: 61 to 34.
+  - By cause: king already attacked by a hidden piece 64 to 52 (now 67% of losses), king stepped
+    into a hidden attack 29 to 18, left attacked by a visible piece 9 to 4, a move opened a line 6
+    to 4.
+  - The KL to the starting model reached 0.03 at round 4; 4-9% of ratios clipped.
+  - The guard paused 4 times when free memory fell below 1 GB (about 15 s each); the next runs
+    on this PC should use 10 workers instead of 12.
+- **What surprised me:** _(Isaiah)_
+- **Decision:** _(Isaiah)_ It replaced `turn_transformer_rl` as the entry (`submission/`), and
+  `reproduce.sh` now has it as stage 7.
+- **AI help:** Claude Code added the two options to the learning loop, ran the fine-tune and the
+  checks one job at a time, wrote the model cards and drafted the facts in this entry.

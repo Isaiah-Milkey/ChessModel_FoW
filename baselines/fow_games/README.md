@@ -101,6 +101,25 @@ the probabilities used in play; the smoke test matched to within 5e-6.
   - Confirm the final pick on other seeds (6 and 7): choosing the best of several noisy ratings
     flatters the winner.
 
+### Starting from the positions it loses (`--midgame-lost`)
+
+```bash
+python baselines/fow_games/rl_loop.py --init agents/turn_transformer_rl --out runs/rl_late --rounds 20 --patience 3     --seed 8 --midgame-share 0.5 --midgame-lost --midgame-plies 20,60 --midgame-games "runs/rl_tf/games/games_*.jsonl.gz"     --bot-weights 1,1,2 --value-init runs/rl_tf/value.safetensors --holdout agents/move_history_branch
+```
+
+- `--midgame-share 0.5`: half the games start from a recorded game in `--midgame-games` instead of
+  move 1. The recorded moves are played through both players, so the model and its opponent build
+  their memory of the game, but only the moves after them are learned from.
+- `--midgame-lost`: only games the agent lost by having its king captured, cut 10 to 30 plies
+  before the end (not before the first number of `--midgame-plies`). The model plays the losing
+  side, against the bot that won. Without it, any long game is cut at a ply in `--midgame-plies`.
+- `--bot-weights 1,1,2`: shares of greedy, guess-sf-4x500 and guess-sf-16x1000 among the bot
+  games (here half against the bot it loses to most).
+- `--value-init`: start the value network from a previous run's instead of warming one up.
+
+This produced `agents/turn_transformer_late` (round 4: 1580 against the bots on seeds 6 and 7,
+60.75% head to head against `turn_transformer_rl`, 78 losses in 1,200 bot games against 108).
+
 Output: `log.jsonl` (one line per round: scores while sampling, draws, value error on new games,
 KL to the start, share of clipped ratios, rating), `games/` (every game in `play_games.py`'s
 format, reusable), `rounds/rNNN/` (each round as an agent directory), `best/` and

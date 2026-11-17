@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproduce submission/ (agents/turn_transformer_rl) end to end, from a fresh clone. See REPRODUCE.md.
+# Reproduce submission/ (agents/turn_transformer_late) end to end, from a fresh clone. See REPRODUCE.md.
 #
 #   bash reproduce.sh          # uses $STOCKFISH, $DEVICE (cpu or cuda, default: cuda if available)
 #
@@ -9,10 +9,11 @@
 #   3. train agents/move_history_branch on them (it plays the value warm-up games in stage 5)
 #   4. encode the same games as turn sequences -> train agents/turn_transformer
 #   5. 60,000 games of move_history_branch against the bots (value warm-up for the loop)
-#   6. learning loop from turn_transformer until the rating plateaus -> runs/rl_tf/best
-#   7. copy the best round's weights into submission/ and check it
+#   6. learning loop from turn_transformer until the rating plateaus -> runs/rl_tf/best (= agents/turn_transformer_rl)
+#   7. learning loop from that model, half its games started shortly before losses from stage 6 -> runs/rl_late/best
+#   8. copy the best round's weights into submission/ and check it
 # It retrains the committed agents in place (agents/move_history, agents/move_history_branch,
-# agents/turn_transformer). About 6.5 hours on a 16-thread PC with one RTX 3060 Ti.
+# agents/turn_transformer). About 8 hours on a 16-thread PC with one RTX 3060 Ti.
 set -euo pipefail
 cd "$(dirname "$0")"
 DEVICE=${DEVICE:-$(python -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')")}
@@ -62,8 +63,18 @@ else
       --workers 12 --value-games data/fow_games --device "$DEVICE"
 fi
 
-stamp "7. assemble and check submission/ (its code is committed; only the weights are copied)"
-cp runs/rl_tf/best/weights/model.safetensors submission/weights/model.safetensors
+stamp "7. learning loop from runs/rl_tf/best, half its games started 10-30 plies before a loss from stage 6"
+if [ -f runs/rl_late/config.json ]; then
+  python baselines/fow_games/rl_loop.py --out runs/rl_late --resume --rounds 20 --patience 3 --workers 12 \
+      --holdout agents/move_history_branch
+else
+  python baselines/fow_games/rl_loop.py --init runs/rl_tf/best --out runs/rl_late --rounds 20 --patience 3 --workers 12 \
+      --seed 8 --midgame-share 0.5 --midgame-lost --midgame-plies 20,60 --midgame-games "runs/rl_tf/games/games_*.jsonl.gz" \
+      --bot-weights 1,1,2 --value-init runs/rl_tf/value.safetensors --holdout agents/move_history_branch --device "$DEVICE"
+fi
+
+stamp "8. assemble and check submission/ (its code is committed; only the weights are copied)"
+cp runs/rl_late/best/weights/model.safetensors submission/weights/model.safetensors
 python -m fow.params submission
 python -m fow.validate submission --device cpu
 sha256sum submission/weights/*.safetensors

@@ -34,6 +34,5 @@
   | `agents/baseline` | 905.5 | | 905.5 / 1000 |
 
 - **Where it still loses** (its 108 losses in the 1,200 bot games): 56% against guess-sf-16x1000; 87% happen after ply 20. In 59% its king was already attacked by a piece it could not see; in 27% its king stepped onto a square attacked by a piece it could not see; in 8% it left its king attacked by a piece it could see. It never missed a chance to take the enemy king. Compared with `agents/turn_transformer` (152 losses), the king-steps-into-a-hidden-attack losses fell from 80 to 29
-- **How to reproduce:** not yet in `reproduce.sh`. Needs `agents/turn_transformer` and `data/fow_games` (see `baselines/fow_games/README.md`), then
-  `python baselines/fow_games/rl_loop.py --init agents/turn_transformer --out runs/rl_tf --rounds 40 --patience 3 --value-games data/fow_games`
-  and copy `runs/rl_tf/best`. The bots are not deterministic, so a rerun will not give the same weights
+- **How to reproduce:** stage 6 of `reproduce.sh` (see `REPRODUCE.md`): `runs/rl_tf/best`. The bots are not deterministic, so a rerun will not give the same weights
+- **Successor:** `agents/turn_transformer_late` (4 more rounds, half of them started shortly before this model's losses) is the entry from 2026-11-17

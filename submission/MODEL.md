@@ -1,41 +1,47 @@
-# Model card: submission (turn_transformer_rl)
+# Model card: submission (turn_transformer_late)
 
 - **Tournament device:** cpu
-- **Entry:** a copy of `agents/turn_transformer_rl` (same code, config and weights). One CPU thread (`torch.set_num_threads(1)` in `agent.py`); it also runs on cuda and plays the same moves there (8 of 8 test games identical)
-
-- **Name:** `agents/turn_transformer` after 8 rounds of learning from its own Fog-of-War games (PPO with a value network, no teacher moves, no search)
-- **Core model:** identical to `agents/turn_transformer` (same `model.py`, `agent.py`, `features.py`, `history.py` and `config.json`): `PolicyNet(in_planes=29, channels=64, blocks=4, d_model=128, layers=2, heads=4, context=64)`, the residual CNN of `agents/move_history_branch` per turn plus a 2-layer causal transformer over the agent's last 64 turns. Only the weights differ. See that card for the architecture
+- **Entry:** a copy of `agents/turn_transformer_late` (same code, config and weights). One CPU thread (`torch.set_num_threads(1)` in `agent.py`); it also runs on cuda and plays the same moves there (8 of 8 test games identical)
+- **Name:** `agents/turn_transformer_rl` after 4 more rounds of learning from its own Fog-of-War games, half of them started from positions where an earlier version went on to lose (PPO with a value network, no teacher moves, no search)
+- **Core model:** identical to `agents/turn_transformer` and `agents/turn_transformer_rl` (same `model.py`, `agent.py`, `features.py`, `history.py` and `config.json`): `PolicyNet(in_planes=29, channels=64, blocks=4, d_model=128, layers=2, heads=4, context=64)`, a residual CNN per turn plus a 2-layer causal transformer over the agent's last 64 turns. Only the weights differ. See `agents/turn_transformer` for the architecture
 - **Parameters:** 805,802 as counted by `python -m fow.params submission`; under the 1M size floor
-- **Weight files and SHA-256:** `weights/model.safetensors`, `dbae26c11bf4e1eb2409a0d2dfab9d9541d94c090db807b5636c525a83ee1efb` (round 8 of `runs/rl_tf`)
+- **Weight files and SHA-256:** `weights/model.safetensors`, `78ee2942044035eb03346c481eace8ea5cbdc231adf515a8ebdff117e52c28ca` (round 4 of `runs/rl_late`)
 - **Input, state within a game, play:** as `agents/turn_transformer`: 29 planes per turn, the turn vectors of this game only (cleared in `reset`), the first 4 own moves sampled at temperature 1 with the game seed, then the top-scoring legal move
-- **Starting point and anchor:** `agents/turn_transformer` (trained to imitate Stockfish 19 on 54,000 branching games; see its card)
-- **Training data:** only games the model played itself, 6,000 new games per round (`baselines/fow_games/rl_loop.py`): 75% against bot:greedy, bot:guess-sf-4x500 and bot:guess-sf-16x1000, 25% against its last 3 saved rounds (the starting model included at first), each opponent with both colours equally. The learner samples its moves at temperature 0.5. A round learns from its own games and the previous round's (12,000 games, about 200,000 of its turns); older games are dropped, so each game is used in 2 rounds (4 passes) and never again. Rounds 1 to 8: 48,000 games, 810,000 turns. No Stockfish labels. The game seeds never overlap the evaluation seeds (6, 7, 9)
-- **Value network (training only, not part of the agent):** a copy of the policy's CNN and transformer with its own head, which also sees which opponent it faces; it predicts the final result (+1/-1) at every turn. Warmed up on 60,000 recorded games of `move_history_branch` against the bots (`data/fow_games`, 1.03M turns, train MSE 0.635), then trained one pass per round on the buffer (MSE on each round's new games fell from 0.69 in round 1 to 0.58 in round 7)
-- **Training:** per round, 2 passes of PPO over the buffer: advantages from GAE (lambda 0.8, gamma 1) on the value network, ratio clipped at 0.2 against the network that played the game, a penalty of 0.1 x KL(starting model || current), learning rate 5e-5, each game's turns weighted min(1, 40 / its turns). Played and trained move probabilities agree to within 1e-5 (TF32 is turned off on the GPU). KL to the starting model after round 8: 0.039; 3-5% of ratios clipped per round
-- **Choosing the round:** each even round was rated against the three bots on seed 9 (600 games). Round 8 rated highest (1550 [1508, 1603]); rounds 10, 12 and 14 rated 1522, 1512 and 1522, so the loop stopped there (3 ratings without a new best). Because the round was picked on seed 9, the ratings below use seeds 6 and 7 only
-- **Training compute:** about 1.5 hours for rounds 1 to 8 (game play on 6 to 8 CPU workers plus under a minute of GPU training per round) on one RTX 3060 Ti PC, not Sol; plus the value warm-up (2 minutes) and the training of `agents/turn_transformer`
-- **Validity:** `python -m fow.validate submission --device cpu --games 10` prints VALID: mean 4.62e7, max 5.93e7 FLOPs per move, 11.8 ms per move on average on one CPU thread of this PC, loaded in 10.9 s. Across 1,800 recorded games against the bots (up to 124 plies) the largest move cost 9.3e7 FLOPs; the transformer reads at most 64 turns, so the cost per move is bounded
-- **Local rating:** 200 games each against bot:greedy, bot:guess-sf-4x500 and bot:guess-sf-16x1000 (the guess-sf bots do not play the same moves on every run):
+- **Starting point and anchor:** `agents/turn_transformer_rl` (the KL penalty pulls towards it, not towards `turn_transformer`)
+- **Why:** 87% of `turn_transformer_rl`'s losses came after ply 20, and its losses per 100 plies rose from 0.08 in plies 1-20 to 1.94 after ply 50. Games that start from move 1 rarely reach those positions, so the loop rarely learned from them
+- **Training data:** only games the model played itself, 6,000 new games per round (`baselines/fow_games/rl_loop.py --midgame-lost`):
+  - Half the games (about 3,000 per round) replay a recorded game that an earlier model lost by having its king captured: the first moves are played as recorded, up to a point 10 to 30 plies before the loss (and not before ply 20), then the model plays on from there as the losing side, against the bot it lost to. The source games are the 84,000 games of `runs/rl_tf` (the loop that produced `turn_transformer_rl`); 13,376 of them are such losses of at least 30 plies. The replayed moves give the model its memory of the game but are not learned from
+  - The other half start from move 1
+  - Opponents: 75% bots, of which 50% bot:guess-sf-16x1000 (the bot it loses to most) and 25% each bot:greedy and bot:guess-sf-4x500; 25% its last 3 saved rounds. Each opponent gets both colours equally (a replayed game keeps the losing side's colour)
+  - Rounds 1 to 4: 24,000 games, 545,000 turns of which 337,000 were learned from (the rest were replayed moves). Learner moves sampled at temperature 0.5. Buffer: the last 2 rounds. No Stockfish labels. Game seeds never overlap the evaluation seeds (6, 7, 9)
+- **Value network (training only, not part of the agent):** the one `runs/rl_tf` ended with (`--value-init runs/rl_tf/value.safetensors`), trained one pass per round on the buffer. Its error on each round's new games fell from 0.88 in round 1 (positions it had not seen before) to 0.77 in round 4
+- **Training:** as `turn_transformer_rl`: per round, 2 passes of PPO over the buffer, GAE (lambda 0.8, gamma 1), ratio clip 0.2, a penalty of 0.1 x KL(`turn_transformer_rl` || current), learning rate 5e-5, each game's turns weighted min(1, 40 / its turns). KL to the starting model after round 4: 0.033; 4-9% of ratios clipped per round
+- **Choosing the round:** each even round was rated against the three bots on seed 9 (600 games): rounds 2, 4, 6, 8, 10 rated 1542, **1597**, 1550, 1572, 1542, so the loop stopped after round 10. On the same seed `turn_transformer_rl` had rated 1550. Because the round was picked on seed 9, the ratings below use seeds 6 and 7 only
+- **Training compute:** 37 minutes for rounds 1 to 4 (97 minutes for all 10 rounds including the ratings), game play on 7 to 8 CPU workers plus under a minute of GPU training per round, on one RTX 3060 Ti PC, not Sol
+- **Validity:** `python -m fow.validate submission --device cpu --games 10` prints VALID: mean 4.41e7, max 4.94e7 FLOPs per move, 11.2 ms per move on average on one CPU thread of this PC, loaded in 1.8 s. The cost per move does not depend on the weights; the transformer reads at most 64 turns, so it is bounded (the largest seen in 1,800 recorded games was 9.3e7)
+- **Local rating:** 200 games each against bot:greedy, bot:guess-sf-4x500 and bot:guess-sf-16x1000:
 
   | Run | vs greedy | vs guess-sf-4x500 | vs guess-sf-16x1000 | Rating (95%) |
   |---|---:|---:|---:|---|
-  | seed 6 | 192 | 188 | 167 | 1522 [1485, 1573] |
-  | seed 7 | 187 | 186 | 172 | 1515 [1458, 1570] |
-  | all 1,200 games | 379 / 400 | 374 / 400 | 339 / 400 | 1519 [1488, 1553] |
+  | seed 6 | 191 | 187 | 184.5 | 1589 [1549, 1650] |
+  | seed 7 | 185 | 193 | 181 | 1572 [1514, 1628] |
+  | all 1,200 games | 376 / 400 | 380 / 400 | 365.5 / 400 | 1580 [1544, 1625] |
 
-  On the same seeds, `agents/turn_transformer` rated 1450 [1422, 1482] (364 / 371 / 313). Against other bots on seed 6 (200 games each): bot:random 199, bot:naive-sf 184, bot:guess-sf-32x4000 178
-- **Head to head** (1,000 games per seed; colours alternate):
+  On the same seeds, `agents/turn_transformer_rl` rated 1519 [1488, 1553] (379 / 374 / 339)
+- **Head to head** against `agents/turn_transformer_rl` (1,000 games per seed; colours alternate): 616 on seed 6, 599 on seed 7, **1215 / 2000 (60.75%, about +75 Elo)**. Against `agents/move_history_branch`, which it never played while learning: 75.5-76% at every rating (200 games each, seed 9), about the same as `turn_transformer_rl`'s 73.6%
+- **Where it still loses** (78 losses in the 1,200 bot games, against 108 for `turn_transformer_rl`):
 
-  | Opponent | Seed 6 | Seed 7 | Score |
-  |---|---:|---:|---:|
-  | `agents/turn_transformer` (its starting point) | 619 | 633 | 1252 / 2000 (62.6%) |
-  | `runs/ft_vppo_l08` (`move_history_branch` after one round with a value head) | 694 | | 694 / 1000 |
-  | control for turn_transformer (same CNN, no transformer) | 701 | | 701 / 1000 |
-  | `agents/move_history_branch` | 736 | | 736 / 1000 |
-  | `agents/move_history` | 807.5 | | 807.5 / 1000 |
-  | `agents/baseline_75k` | 828.5 | | 828.5 / 1000 |
-  | `agents/baseline` | 905.5 | | 905.5 / 1000 |
+  | | `turn_transformer_rl` | `turn_transformer_late` |
+  |---|---:|---:|
+  | Losses per 100 plies, plies 1-20 | 0.08 | 0.05 |
+  | plies 21-50 | 0.38 | 0.34 |
+  | plies 51 and later | 1.94 | 1.35 |
+  | Losses against guess-sf-16x1000 | 61 | 34 |
+  | King already attacked by a piece it could not see | 64 | 52 |
+  | King stepped onto a square attacked by a piece it could not see | 29 | 18 |
+  | King left attacked by a piece it could see | 9 | 4 |
+  | Another move opened a line to the king | 6 | 4 |
 
-- **Where it still loses** (its 108 losses in the 1,200 bot games): 56% against guess-sf-16x1000; 87% happen after ply 20. In 59% its king was already attacked by a piece it could not see; in 27% its king stepped onto a square attacked by a piece it could not see; in 8% it left its king attacked by a piece it could see. It never missed a chance to take the enemy king. Compared with `agents/turn_transformer` (152 losses), the king-steps-into-a-hidden-attack losses fell from 80 to 29
-- **Hardware and GPU-hours:** everything ran on a personal Windows PC (RTX 3060 Ti, 16 CPU threads), not Sol. GPU: about 1.5 GPU-hours in total for the whole chain (training `move_history`, `move_history_branch` and `turn_transformer`, the learning loop's training steps and the rating games); the rest is CPU game play and Stockfish labelling, about 5 hours on 10-12 CPU workers
-- **How to reproduce:** `bash reproduce.sh` from a fresh clone (see `REPRODUCE.md`). It rebuilds every stage: data for `move_history`, its training, the branching games, `turn_transformer`, `move_history_branch`, the value warm-up games and the learning loop, then copies the best round into `submission/`. The bots are not deterministic, so the rebuilt weights will differ from these
+  The late game is still where most losses happen, and checks from pieces it cannot see are now two thirds of them
+- **Hardware and GPU-hours:** everything ran on a personal Windows PC (RTX 3060 Ti, 16 CPU threads), not Sol. GPU: about 1.7 GPU-hours in total for the whole chain (training `move_history`, `move_history_branch` and `turn_transformer`, both learning loops' training steps and the rating games); the rest is CPU game play and Stockfish labelling, about 6.5 hours on 7-12 CPU workers
+- **How to reproduce:** `bash reproduce.sh` from a fresh clone (see `REPRODUCE.md`). It rebuilds every stage: data for `move_history`, its training, the branching games, `move_history_branch`, `turn_transformer`, the value warm-up games, the first learning loop (`runs/rl_tf`, which gives `turn_transformer_rl`), this loop from that one's lost games (`runs/rl_late`), then copies the best round into `submission/`. The bots are not deterministic, so the rebuilt weights will differ from these

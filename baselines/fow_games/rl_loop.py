@@ -220,15 +220,20 @@ def encode_record_file(job):
     return out
 
 
-def load_openings(pattern, lo, hi, min_left):
-    """Move lists of recorded games long enough to start a game from ply lo..hi with min_left plies to go."""
+def load_openings(pattern, lo, min_left, lost_only=False):
+    """Recorded games long enough to start from ply lo with min_left plies to go: (moves, agent colour,
+    opponent). lost_only keeps the games the agent lost by having its king captured."""
     out = []
     for path in sorted(glob.glob(pattern, recursive=True)):
         with gzip.open(path, "rt") as f:
             for line in f:
                 rec = json.loads(line)
-                if rec["plies"] >= lo + min_left and rec.get("start_ply", 0) == 0:
-                    out.append(rec["moves"])
+                if rec["plies"] < lo + min_left or rec.get("start_ply", 0) > 0:
+                    continue
+                if lost_only and not (SCORE[rec["result"]][rec["agent_color"]] < 0
+                                      and rec["termination"] == "king captured"):
+                    continue
+                out.append((rec["moves"], rec["agent_color"], rec["opponent"]))
     return out
 
 
@@ -447,6 +452,10 @@ def main():
                     help="share of games that start from a recorded game's position at ply --midgame-plies")
     ap.add_argument("--midgame-games", default="", help="glob of recorded games (games_*.jsonl.gz) to take openings from")
     ap.add_argument("--midgame-plies", default="30,60", help="start ply range, lo,hi")
+    ap.add_argument("--midgame-lost", action="store_true",
+                    help="start only from games the agent lost, 10 to 30 plies before its king was taken (at ply lo "
+                         "or later), playing the losing side against the bot it lost to")
+    ap.add_argument("--bot-weights", default="1,1,1", help="relative share of games against each of the three bots")
     ap.add_argument("--resume", action="store_true",
                     help="continue the run in --out from its last finished round (its saved settings are used, "
                          "except --rounds, --workers, --patience and --holdout)")
@@ -492,8 +501,9 @@ def main():
     value_path = os.path.join(args.out, "value.safetensors")
     openings, mid_lo, mid_hi = [], *map(int, args.midgame_plies.split(","))
     if args.midgame_share > 0:
-        openings = load_openings(args.midgame_games, mid_lo, mid_hi, 10)
-        print(f"mid-game starts: {len(openings):,} recorded games of at least {mid_lo + 10} plies", flush=True)
+        openings = load_openings(args.midgame_games, mid_lo, 10, args.midgame_lost)
+        print(f"mid-game starts: {len(openings):,} recorded {'lost ' if args.midgame_lost else ''}games "
+              f"of at least {mid_lo + 10} plies", flush=True)
         assert openings, f"no recorded games match {args.midgame_games}"
 
     if os.path.exists(value_path):                        # resuming: the value as saved after the last round
@@ -546,7 +556,8 @@ def main():
         cur = os.path.join(args.out, "rounds", f"r{r - 1:03d}") if r > 1 else args.init
         n_self = int(round(args.league_share * args.games))
         pairs = []                                        # (opponent, agent colour): each opponent gets both colours equally
-        for pool_, n in ((BOTS, args.games - n_self), (league[-args.league:], n_self)):
+        bot_pool = [b for b, k in zip(BOTS, map(int, args.bot_weights.split(","))) for _ in range(k)]
+        for pool_, n in ((bot_pool, args.games - n_self), (league[-args.league:], n_self)):
             pairs += [(pool_[j % len(pool_)], "white" if (j // len(pool_)) % 2 == 0 else "black") for j in range(n)]
         base = (args.seed * 1000 + r) * 1_000_000
         mid = random.Random(base)                         # which games start mid-game, and from where
@@ -554,8 +565,13 @@ def main():
         for i, (opp, me) in enumerate(pairs):
             prefix = []
             if openings and mid.random() < args.midgame_share:
-                src = openings[mid.randrange(len(openings))]
-                prefix = src[:mid.randint(mid_lo, min(mid_hi, len(src) - 10))]
+                src, src_me, src_opp = openings[mid.randrange(len(openings))]
+                if args.midgame_lost:                     # replay the losing side, 10-30 plies before the loss
+                    prefix = src[:mid.randint(max(mid_lo, len(src) - 30), len(src) - 10)]
+                    me = src_me
+                    opp = src_opp if src_opp in BOTS else opp
+                else:
+                    prefix = src[:mid.randint(mid_lo, min(mid_hi, len(src) - 10))]
             games.append((i, base + i, opp, me, prefix))
         cfg = {"policy": cur, "temperature": args.temperature, "round": r, "games_dir": os.path.join(args.out, "games")}
         jobs = [(w, games[w::n_workers], cfg) for w in range(n_workers)]
