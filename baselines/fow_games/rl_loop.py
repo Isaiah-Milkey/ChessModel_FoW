@@ -69,6 +69,7 @@ from fow.game import Game  # noqa: E402
 BOTS = ["bot:greedy", "bot:guess-sf-4x500", "bot:guess-sf-16x1000"]
 SELF = len(BOTS)                      # opponent index of every saved version of our own model
 GB_PER_WORKER = 0.7                   # memory of one game-playing worker (torch, the network, a bot)
+ARENA_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"   # device for the rating games
 GUARD = None                          # set in main(); pauses training while the PC is overloaded
 SCORE = {"1-0": {"white": 1, "black": -1}, "0-1": {"white": -1, "black": 1},
          "1/2-1/2": {"white": 0, "black": 0}}
@@ -104,7 +105,9 @@ class Learner:
         self.mem, self.turns, self.rng = self.make_memory(), [], random.Random(seed)
 
     @torch.no_grad()
-    def act(self, obs):
+    def act(self, obs, force=None):
+        """Sample a move; with `force` (a move of a recorded opening, for a mid-game start) play that
+        move instead, still reading the turn so memory and turn context are built as in a real game."""
         self.mem.update(obs)
         x = self.enc(obs, self.mem)
         h = self.net.trunk(torch.from_numpy(x).float().unsqueeze(0))
@@ -114,11 +117,17 @@ class Learner:
         legal = self.legal_idx(obs)
         idx = sorted(legal)
         lp = torch.log_softmax(logits[idx] / self.t, 0)
-        k = self.rng.choices(range(len(idx)), weights=lp.exp().tolist())[0]
+        if force is None:
+            k = self.rng.choices(range(len(idx)), weights=lp.exp().tolist())[0]
+            mv = legal[idx[k]]
+        else:                                             # under-promotions are scored as the queen promotion
+            want = force if len(force) == 4 else force[:4] + "q"
+            k = next(j for j, i in enumerate(idx) if legal[i] == want)
+            mv = force
         mask = np.zeros(N_MOVES, np.uint8)
         mask[idx] = 1
-        return legal[idx[k]], dict(bits=pack(x, obs["ply"]), ply=obs["ply"], move=idx[k],
-                                   legal=np.packbits(mask), logp_b=float(lp[k]))
+        return mv, dict(bits=pack(x, obs["ply"]), ply=obs["ply"], move=idx[k],
+                        legal=np.packbits(mask), logp_b=float(lp[k]), learn=force is None)
 
 
 def play_worker(job):
@@ -129,7 +138,7 @@ def play_worker(job):
     rows, g_off, g_res, g_opp, g_id = [], [0], [], [], []
     path = os.path.join(cfg["games_dir"], f"games_r{cfg['round']}_{wid}.jsonl.gz")
     with gzip.open(path, "wt") as f:
-        for gid, gseed, opp, me in games:
+        for gid, gseed, opp, me, prefix in games:
             if opp not in opps:
                 if opp.startswith("bot:"):
                     opps[opp] = make_bot(opp)
@@ -144,12 +153,14 @@ def play_worker(job):
             game, moves, logps = Game(), [], []
             while not game.over:
                 obs = game.observation()
+                force = prefix[len(moves)] if len(moves) < len(prefix) else None   # mid-game start
                 if obs["color"] == me:
-                    mv, row = me_net.act(obs)
+                    mv, row = me_net.act(obs, force)
                     rows.append(row)
                     logps.append(round(row["logp_b"], 6))
                 else:
-                    mv = bot.act(obs)
+                    mv = bot.act(obs)                     # the opponent also reads the forced opening
+                    mv = force or mv
                 moves.append(mv)
                 game.play(mv)
             g_off.append(len(rows))
@@ -158,13 +169,15 @@ def play_worker(job):
             g_id.append(gid)
             f.write(json.dumps({"id": gid, "seed": gseed, "opponent": opp, "agent_color": me, "moves": moves,
                                 "result": game.result, "termination": game.termination, "plies": len(moves),
-                                "temperature": cfg["temperature"], "agent_logp": logps}) + "\n")
+                                "temperature": cfg["temperature"], "agent_logp": logps,
+                                "start_ply": len(prefix)}) + "\n")
     for o in opps.values():
         if hasattr(o, "close"):
             o.close()
     return dict(bits=np.stack([r["bits"] for r in rows]), ply=np.array([r["ply"] for r in rows], np.int16),
                 move=np.array([r["move"] for r in rows], np.int64), legal=np.stack([r["legal"] for r in rows]),
-                logp_b=np.array([r["logp_b"] for r in rows], np.float32), g_off=np.array(g_off, np.int64),
+                logp_b=np.array([r["logp_b"] for r in rows], np.float32),
+                learn=np.array([r["learn"] for r in rows], np.uint8), g_off=np.array(g_off, np.int64),
                 g_res=np.array(g_res, np.float32), g_opp=np.array(g_opp, np.int64), g_id=np.array(g_id, np.int64))
 
 
@@ -174,16 +187,19 @@ def encode_record_file(job):
     path, agent_dir, full = job
     make_memory, enc, legal_idx, move_idx = load_encoding(agent_dir)
     bits, ply, move, legal, logp_b, g_off, g_res, g_opp, g_id = [], [], [], [], [], [0], [], [], []
+    learn = []
     with gzip.open(path, "rt") as f:
         for line in f:
             rec = json.loads(line)
             me, mem, game, turn = rec["agent_color"], make_memory(), Game(), 0
+            start = rec.get("start_ply", 0)               # turns of a forced opening are context only
             for mv in rec["moves"]:
                 obs = game.observation()
                 if obs["color"] == me:
                     mem.update(obs)
                     bits.append(pack(enc(obs, mem), obs["ply"]))
                     ply.append(obs["ply"])
+                    learn.append(obs["ply"] >= start)
                     if full:
                         mask = np.zeros(N_MOVES, np.uint8)
                         mask[list(legal_idx(obs))] = 1
@@ -199,7 +215,20 @@ def encode_record_file(job):
     out = dict(bits=np.stack(bits), ply=np.array(ply, np.int16), g_off=np.array(g_off, np.int64),
                g_res=np.array(g_res, np.float32), g_opp=np.array(g_opp, np.int64), g_id=np.array(g_id, np.int64))
     if full:
-        out.update(move=np.array(move, np.int64), legal=np.stack(legal), logp_b=np.array(logp_b, np.float32))
+        out.update(move=np.array(move, np.int64), legal=np.stack(legal), logp_b=np.array(logp_b, np.float32),
+                   learn=np.array(learn, np.uint8))
+    return out
+
+
+def load_openings(pattern, lo, hi, min_left):
+    """Move lists of recorded games long enough to start a game from ply lo..hi with min_left plies to go."""
+    out = []
+    for path in sorted(glob.glob(pattern, recursive=True)):
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                rec = json.loads(line)
+                if rec["plies"] >= lo + min_left and rec.get("start_ply", 0) == 0:
+                    out.append(rec["moves"])
     return out
 
 
@@ -354,7 +383,7 @@ def save_agent(net, init, path, note):
 
 def arena_rating(agent_dir, games, seed, workers):
     """Rating against the three bots from fow.arena (and the agent's score against each)."""
-    cmd = [sys.executable, "-m", "fow.arena", agent_dir, *BOTS, "--games", str(games), "--device", "cuda",
+    cmd = [sys.executable, "-m", "fow.arena", agent_dir, *BOTS, "--games", str(games), "--device", ARENA_DEVICE,
            "--workers", str(workers), "--seed", str(seed)]
     out = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout.replace("\\", "/")
     name = re.escape(agent_dir.replace("\\", "/"))
@@ -376,7 +405,7 @@ def pair_score(out, a, b):
 
 def holdout_score(agent_dir, other, games, seed, workers):
     """Score against an agent the loop never plays (a check that it is not just learning the bots)."""
-    cmd = [sys.executable, "-m", "fow.arena", agent_dir, other, "--games", str(games), "--device", "cuda",
+    cmd = [sys.executable, "-m", "fow.arena", agent_dir, other, "--games", str(games), "--device", ARENA_DEVICE,
            "--workers", str(workers), "--seed", str(seed)]
     out = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout.replace("\\", "/")
     return pair_score(out, agent_dir, other)
@@ -413,6 +442,11 @@ def main():
                     help="stop after this many ratings in a row without a new best (0: run all --rounds)")
     ap.add_argument("--holdout", default="", help="agent never played in training; scored against at each rating")
     ap.add_argument("--holdout-games", type=int, default=200)
+    ap.add_argument("--value-init", default="", help="value weights to start from (value.safetensors of an earlier run)")
+    ap.add_argument("--midgame-share", type=float, default=0.0,
+                    help="share of games that start from a recorded game's position at ply --midgame-plies")
+    ap.add_argument("--midgame-games", default="", help="glob of recorded games (games_*.jsonl.gz) to take openings from")
+    ap.add_argument("--midgame-plies", default="30,60", help="start ply range, lo,hi")
     ap.add_argument("--resume", action="store_true",
                     help="continue the run in --out from its last finished round (its saved settings are used, "
                          "except --rounds, --workers, --patience and --holdout)")
@@ -422,7 +456,8 @@ def main():
     done = []                                             # log entries of the rounds already finished
     if args.resume:
         saved = json.load(open(os.path.join(args.out, "config.json")))
-        args = argparse.Namespace(**{**saved, "out": args.out, "rounds": args.rounds, "workers": args.workers,
+        defaults = vars(ap.parse_args(["--out", args.out]))      # settings added after the run started
+        args = argparse.Namespace(**{**defaults, **saved, "out": args.out, "rounds": args.rounds, "workers": args.workers,
                                      "patience": args.patience, "holdout": args.holdout,
                                      "holdout_games": args.holdout_games, "resume": True})
         path = os.path.join(args.out, "log.jsonl")
@@ -453,11 +488,19 @@ def main():
     v_opt = torch.optim.AdamW(critic.parameters(), lr=args.value_lr, weight_decay=1e-4)
     p_opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=0.0)
     league = [os.path.abspath(args.init)]
-    keys = ("bits", "ply", "move", "legal", "logp_b", "logp_r", "g_res", "g_opp", "g_id", "g_off")
+    keys = ("bits", "ply", "move", "legal", "logp_b", "logp_r", "learn", "g_res", "g_opp", "g_id", "g_off")
     value_path = os.path.join(args.out, "value.safetensors")
+    openings, mid_lo, mid_hi = [], *map(int, args.midgame_plies.split(","))
+    if args.midgame_share > 0:
+        openings = load_openings(args.midgame_games, mid_lo, mid_hi, 10)
+        print(f"mid-game starts: {len(openings):,} recorded games of at least {mid_lo + 10} plies", flush=True)
+        assert openings, f"no recorded games match {args.midgame_games}"
 
     if os.path.exists(value_path):                        # resuming: the value as saved after the last round
         critic.load_state_dict(load_file(value_path))
+    elif args.value_init:                                 # start from an earlier run's value
+        critic.load_state_dict(load_file(args.value_init))
+        save_file({k: v.detach().cpu().contiguous() for k, v in critic.state_dict().items()}, value_path)
     elif args.value_games:                                # warm up the value on games already played
         t = time.time()
         GUARD.wait_ok()
@@ -506,12 +549,19 @@ def main():
         for pool_, n in ((BOTS, args.games - n_self), (league[-args.league:], n_self)):
             pairs += [(pool_[j % len(pool_)], "white" if (j // len(pool_)) % 2 == 0 else "black") for j in range(n)]
         base = (args.seed * 1000 + r) * 1_000_000
-        games = [(i, base + i, opp, me) for i, (opp, me) in enumerate(pairs)]
+        mid = random.Random(base)                         # which games start mid-game, and from where
+        games = []
+        for i, (opp, me) in enumerate(pairs):
+            prefix = []
+            if openings and mid.random() < args.midgame_share:
+                src = openings[mid.randrange(len(openings))]
+                prefix = src[:mid.randint(mid_lo, min(mid_hi, len(src) - 10))]
+            games.append((i, base + i, opp, me, prefix))
         cfg = {"policy": cur, "temperature": args.temperature, "round": r, "games_dir": os.path.join(args.out, "games")}
         jobs = [(w, games[w::n_workers], cfg) for w in range(n_workers)]
         with mp.get_context("spawn").Pool(n_workers) as pool:
             parts = pool.map(play_worker, jobs)
-        new = join(parts, ("bits", "ply", "move", "legal", "logp_b", "g_res", "g_opp", "g_id"))
+        new = join(parts, ("bits", "ply", "move", "legal", "logp_b", "learn", "g_res", "g_opp", "g_id"))
         t_play = time.time() - t0
 
         net.eval()
@@ -545,6 +595,7 @@ def main():
         ch, _ = chunks_of(buf["g_off"], net.context)
         g_of, res, opp, glen = per_row(buf)
         w_row = np.minimum(1, args.turn_cap / glen).astype(np.float32)
+        w_pol = w_row * buf["learn"]                      # the forced opening of a mid-game start is context only
         v_mse = train_critic(critic, v_opt, buf, ch, w_row, dev, args.value_epochs, rng)
         v = predict_values(critic, buf, ch, opp, dev)
         adv = gae(buf, v, args.lam)
@@ -563,7 +614,9 @@ def main():
                 mv = torch.from_numpy(buf["move"][rows]).to(dev)
                 rho = torch.exp(lp[ar, mv] - torch.from_numpy(buf["logp_r"][rows]).to(dev))
                 A = torch.from_numpy(adv[rows]).to(dev)
-                w = torch.from_numpy(w_row[rows]).to(dev)
+                w = torch.from_numpy(w_pol[rows]).to(dev)
+                if w.sum() == 0:
+                    continue
                 pol = -torch.min(rho * A, rho.clamp(1 - args.clip, 1 + args.clip) * A)
                 kl = torch.where(mb, lp0.exp() * (lp0 - lp), 0.0).sum(1)
                 loss = (w * (pol + args.kl * kl)).sum() / w.sum()
@@ -580,6 +633,7 @@ def main():
         save_agent(net, args.init, rdir, f"rl_loop round {r} from {args.init}")
         league.append(os.path.abspath(rdir))
         entry = {"round": r, "games": len(new["g_res"]), "turns": len(new["ply"]), "buffer_games": len(buf["g_res"]),
+                 "midgame_games": sum(1 for g in games if g[4]), "learned_turns": int(new["learn"].sum()),
                  "score_while_sampling": score, "draws": round(draws, 3),
                  "value_mse_new_games": round(v_mse_new, 4), "value_mse_train": round(v_mse, 4),
                  "mean_abs_adv": round(float(np.abs(adv).mean()), 4),

@@ -20,7 +20,10 @@ import subprocess
 import sys
 import time
 
-import psutil
+try:
+    import psutil                     # pip install psutil; without it only the lock and CPU cap apply
+except ImportError:
+    psutil = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCK = os.path.join(ROOT, "runs", ".heavy_job.lock")
@@ -72,6 +75,8 @@ class Guard:
 
     def status(self):
         """(problem or None, short description of the machine's state)."""
+        if psutil is None:
+            return None, "psutil not installed: memory not checked"
         vm = psutil.virtual_memory()
         free = vm.available / 2 ** 30
         if time.time() - self._temp_at > 20:
@@ -105,7 +110,9 @@ class Guard:
         if self.off:
             return requested
         cap = min(requested, (os.cpu_count() or 4) - 2)
-        fits = lambda f: max(1, min(cap, int((f - self.min_free_gb) // gb_each)))
+        if psutil is None:
+            return max(1, cap)
+        fits =lambda f: max(1, min(cap, int((f - self.min_free_gb) // gb_each)))
         free = psutil.virtual_memory().available / 2 ** 30
         for _ in range(6):                    # memory from a job that just ended takes a little while to return
             if fits(free) >= cap:
