@@ -584,8 +584,11 @@ def main():
         ch_new, _ = chunks_of(new["g_off"], net.context)
         new["logp_r"] = round_logp(net, new, ch_new, dev)
         if r == 1:                                        # the batch computation must match what the learner played
+            # Only the first chunk of each game: play reads a sliding window of the last `context` turns,
+            # while training cuts a game into fixed chunks, so turns after the first `context` of a game
+            # see a shorter history in training (0.02% of turns in runs/rl_tf; see the README).
             with torch.no_grad():
-                sel = np.arange(min(64, len(ch_new)))
+                sel = np.flatnonzero(np.isin(ch_new[:, 0], new["g_off"][:-1]))[:64]
                 x, lens, rows = gather(new, ch_new, sel, dev)
                 h, c = features(net, x, lens)
                 lg = net.policy(h, c)

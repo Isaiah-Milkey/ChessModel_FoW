@@ -83,6 +83,11 @@ the probabilities used in play; the smoke test matched to within 5e-6.
   round and is then dropped, so no game is learned more than 4 times.
 - **Long games:** a turn counts `min(1, 40 / turns in its game)`, so a long draw counts no more
   than a 40-turn game.
+- **Turns after the 64th:** in play the transformer reads the last 64 turns; in training a game is
+  cut into fixed chunks of 64 turns, so turn 70 sees only turns 65-70. This affects only games
+  where the agent plays more than 64 turns (1 of 1,715 games, 0.02% of turns in round 1 of
+  `runs/rl_tf`). The first-round check compares play and training on each game's first 64 turns,
+  where they agree to within 1e-5.
 - **Value (critic):**
   - It is a copy of the policy's CNN and transformer, with its own head that also sees the
     opponent. It is used only in training and is not part of the agent.
