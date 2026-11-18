@@ -19,8 +19,9 @@
 - Versions used for this entry: Python 3.12.10, torch 2.6.0 (CUDA 12.4), numpy 2.2.6,
   safetensors 0.8.0, python-chess 1.11.2, psutil 6.1.1. Windows 10, but the scripts are plain
   Python and bash.
-- Stockfish 19: `bash scripts/get_stockfish.sh`, then `export STOCKFISH=…`. (The script downloads
-  the latest release; this entry's labels came from Stockfish 19.)
+- Stockfish 19: `bash scripts/get_stockfish.sh`, then the `export STOCKFISH=…` line it prints. The
+  script downloads the official Stockfish 19 Linux build (pinned to the `sf_19` release, the
+  version that labelled this entry's data). Check it starts with `echo uci | $STOCKFISH`.
 - Optional: `DEVICE=cpu` or `DEVICE=cuda` (default: cuda if available).
 
 ## 2. Pipeline
