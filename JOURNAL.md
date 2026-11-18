@@ -542,8 +542,8 @@ This is where the evidence for your grade lives (see docs/GRADING.md).
   - The KL to the starting model reached 0.03 at round 4; 4-9% of ratios clipped.
   - The guard paused 4 times when free memory fell below 1 GB (about 15 s each); the next runs
     on this PC should use 10 workers instead of 12.
-- **What surprised me:** _(Isaiah)_
-- **Decision:** _(Isaiah)_ It replaced `turn_transformer_rl` as the entry (`submission/`), and
-  `reproduce.sh` now has it as stage 7.
+- **What surprised me:** I was surprised at the amount of elo that it gained, but wonder why it plateaus. 2/3 of losses are still from late end-games.
+- **Decision:** It replaced `turn_transformer_rl` as the entry (`submission/`), and
+  `reproduce.sh` now has it as stage 7. I plan to add a 'danger' heatmap so the king doesn't get put into check as much from possible dangerous squares.
 - **AI help:** Claude Code added the two options to the learning loop, ran the fine-tune and the
   checks one job at a time, wrote the model cards and drafted the facts in this entry.
