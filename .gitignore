@@ -8,3 +8,4 @@ data/
 runs/
 *.jsonl
 stockfish/
+quick/

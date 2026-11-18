@@ -11,6 +11,9 @@
   last with half its games started shortly before positions where an earlier version lost.
 - **One command:** `bash reproduce.sh` (about 8 hours on a 16-thread PC with one GPU). Each stage
   is skipped if its output exists, so the script can simply be rerun after a job time limit.
+- **Test run first:** `QUICK=1 bash reproduce.sh` runs every stage with tiny sizes (300 games,
+  1 epoch, 2 learning rounds) into `quick/`, without touching `data/`, `agents/`, `runs/` or
+  `submission/`. It checks that the pipeline runs on a machine, not the result; delete `quick/` after.
 
 ## 1. Environment
 
